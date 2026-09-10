@@ -15,7 +15,9 @@
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepare": "tsc -p tsconfig.json"
+    "prepare": "tsc -p tsconfig.json",
+    "test": "T3CTL_CONFIG_DIR=$(mktemp -d) node --import tsx --test \"test/*.test.ts\"",
+    "record-fixtures": "tsx test/record-fixtures.ts"
   },
   "dependencies": {
     "commander": "^14.0.0",

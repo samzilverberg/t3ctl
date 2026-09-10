@@ -40,6 +40,8 @@ src/time.ts         "when" parser for snooze and one-shot schedules
 src/schedule.ts     job store (~/.config/t3ctl/schedule.json), cron evaluation (croner), grace/overlap rules, lock
 src/launchd.ts      LaunchAgent plist for `schedule tick` (label dev.t3ctl.scheduler)
 skills/t3ctl        agent skill; symlinked at ~/.claude/skills/t3ctl (edits are live immediately)
+test/*.test.ts      node:test unit tests (run with `pnpm test`); test/fixtures = recorded, scrubbed server payloads
+docs/*.md           user docs split by topic (commands, scheduler, models, auth, agents, architecture)
 docs/research       protocol notes from the upstream source
 ```
 
@@ -50,9 +52,21 @@ docs/research       protocol notes from the upstream source
 2. Register it in the matching `src/commands/*.ts`. Accept `<ref>` = id, id prefix, or exact title via
    `matchThread` / `matchProject`. Emit with `emit(format, jsonValue, () => tableString)` so `-f json` and
    non-TTY output stay machine-readable.
-3. Update README command block, `skills/t3ctl/SKILL.md` if agents should use it, and bump `version` in
-   package.json for user-visible changes.
+3. Update `docs/commands.md` (and the README quick tour if it is a headline feature), `skills/t3ctl/SKILL.md` if
+   agents should use it, and bump `version` in package.json for user-visible changes.
 4. `pnpm typecheck && pnpm build`, then validate live (below).
+
+## Tests
+
+`pnpm test` runs `node --test` through tsx against fixtures in `test/fixtures/` (provider catalog, a scrubbed
+shell snapshot, activity logs with an approval and a user-input request). Pure logic is covered: `time`,
+`schedule` (grace/overlap/occurrence rules), `models` (alias + fuzzy resolution, option validation), `pending`,
+`threadStatus`, `matchThread`/`matchProject`. Nothing in `test/` talks to a server.
+
+When the server changes shape, re-record: unarchive one thread that had an approval and one that had an
+AskUserQuestion, then `pnpm record-fixtures <approvalRef> <userInputRef>`, re-archive them, and check the diff
+for anything personal before committing (the recorder replaces titles, paths, message text and tool arguments).
+Add a test whenever a live bug is fixed in one of the pure modules.
 
 ## Validating live
 
@@ -82,4 +96,4 @@ grepped in `~/.t3/userdata/logs/desktop.trace.ndjson`.
 
 ## Releasing a change
 
-`pnpm build` → live test → `git commit` → `git push` (remote `samzilverberg/t3ctl`, branch `main`). No CI yet.
+`pnpm test && pnpm build` → live test → `git commit` → `git push` (remote `samzilverberg/t3ctl`, branch `main`). No CI yet.

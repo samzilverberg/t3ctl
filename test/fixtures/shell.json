@@ -1,0 +1,176 @@
+{
+  "snapshotSequence": 56201,
+  "projects": [
+    {
+      "id": "749237b5-59cb-4c61-88e0-7760e5e4e6b9",
+      "title": "project-0",
+      "workspaceRoot": "/tmp/project-0",
+      "defaultModelSelection": {
+        "instanceId": "claudeAgent",
+        "model": "claude-opus-4-8"
+      }
+    },
+    {
+      "id": "764769a1-3aed-4041-8ed1-d563f2977900",
+      "title": "project-1",
+      "workspaceRoot": "/tmp/project-1",
+      "defaultModelSelection": null
+    }
+  ],
+  "threads": [
+    {
+      "id": "5c9ea42d-7aba-4af5-8bd8-4b23b973ae80",
+      "projectId": "749237b5-59cb-4c61-88e0-7760e5e4e6b9",
+      "title": "thread-0",
+      "createdAt": "2026-08-31T10:53:46.638Z",
+      "updatedAt": "2026-09-10T13:48:55.565Z",
+      "archivedAt": null,
+      "branch": "feature/x",
+      "worktreePath": null,
+      "modelSelection": {
+        "instanceId": "claudeAgent",
+        "model": "claude-opus-4-8",
+        "options": [
+          {
+            "id": "effort",
+            "value": "high"
+          },
+          {
+            "id": "fastMode",
+            "value": false
+          }
+        ]
+      },
+      "latestTurn": {
+        "turnId": "8d4673f6-7a49-47ac-81e7-cbbef4cdbb9c",
+        "state": "running",
+        "requestedAt": "2026-09-10T13:48:20.269Z",
+        "startedAt": "2026-09-10T13:48:20.269Z",
+        "completedAt": null,
+        "assistantMessageId": "assistant:5e260b87-6bce-4971-80a9-17f6241401bd"
+      },
+      "session": {
+        "threadId": "5c9ea42d-7aba-4af5-8bd8-4b23b973ae80",
+        "status": "running",
+        "providerName": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "runtimeMode": "auto",
+        "activeTurnId": "8d4673f6-7a49-47ac-81e7-cbbef4cdbb9c",
+        "lastError": null,
+        "updatedAt": "2026-09-10T13:48:55.565Z"
+      },
+      "hasPendingApprovals": false,
+      "hasPendingUserInput": false,
+      "runtimeMode": "auto",
+      "interactionMode": "default"
+    },
+    {
+      "id": "8a08a310-6801-41d8-8cd5-0f22219bf0cf",
+      "projectId": "749237b5-59cb-4c61-88e0-7760e5e4e6b9",
+      "title": "thread-1",
+      "createdAt": "2026-08-30T11:53:46.705Z",
+      "updatedAt": "2026-09-08T15:26:10.339Z",
+      "archivedAt": null,
+      "branch": "feature/x",
+      "worktreePath": null,
+      "modelSelection": {
+        "instanceId": "claudeAgent",
+        "model": "claude-opus-4-8",
+        "options": [
+          {
+            "id": "effort",
+            "value": "high"
+          }
+        ]
+      },
+      "latestTurn": {
+        "turnId": "0c477661-5987-4f65-bab2-deb54b717be6",
+        "state": "completed",
+        "requestedAt": "2026-09-08T08:26:40.412Z",
+        "startedAt": "2026-09-08T08:26:40.412Z",
+        "completedAt": "2026-09-08T08:26:49.850Z",
+        "assistantMessageId": "assistant:892d3e80-f991-4acf-9e45-e64855060f39"
+      },
+      "session": {
+        "threadId": "8a08a310-6801-41d8-8cd5-0f22219bf0cf",
+        "status": "stopped",
+        "providerName": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "runtimeMode": "auto",
+        "activeTurnId": null,
+        "lastError": null,
+        "updatedAt": "2026-09-08T08:58:31.563Z"
+      },
+      "hasPendingApprovals": false,
+      "hasPendingUserInput": false,
+      "runtimeMode": "auto",
+      "interactionMode": "default"
+    },
+    {
+      "id": "7c95de25-ea9d-46e3-8a91-52b589d91b29",
+      "projectId": "749237b5-59cb-4c61-88e0-7760e5e4e6b9",
+      "title": "thread-2",
+      "createdAt": "2026-09-07T07:47:09.033Z",
+      "updatedAt": "2026-09-10T13:46:19.230Z",
+      "archivedAt": null,
+      "branch": "feature/x",
+      "worktreePath": null,
+      "modelSelection": {
+        "instanceId": "claudeAgent",
+        "model": "claude-opus-4-8",
+        "options": [
+          {
+            "id": "effort",
+            "value": "high"
+          },
+          {
+            "id": "fastMode",
+            "value": false
+          }
+        ]
+      },
+      "latestTurn": {
+        "turnId": "e194df22-9ca7-418d-948e-b3a928903712",
+        "state": "running",
+        "requestedAt": "2026-09-10T13:23:08.716Z",
+        "startedAt": "2026-09-10T13:23:08.716Z",
+        "completedAt": null,
+        "assistantMessageId": "assistant:69531f66-c7d1-4e9f-a307-41dac0977480"
+      },
+      "session": {
+        "threadId": "7c95de25-ea9d-46e3-8a91-52b589d91b29",
+        "status": "running",
+        "providerName": "claudeAgent",
+        "providerInstanceId": "claudeAgent",
+        "runtimeMode": "auto",
+        "activeTurnId": "e194df22-9ca7-418d-948e-b3a928903712",
+        "lastError": null,
+        "updatedAt": "2026-09-10T13:45:50.557Z"
+      },
+      "hasPendingApprovals": false,
+      "hasPendingUserInput": true,
+      "runtimeMode": "auto",
+      "interactionMode": "default"
+    },
+    {
+      "id": "c25256cb-072b-4b44-b1b2-19c351e12982",
+      "projectId": "749237b5-59cb-4c61-88e0-7760e5e4e6b9",
+      "title": "thread-3",
+      "createdAt": "2026-09-10T04:30:49.855Z",
+      "updatedAt": "2026-09-10T04:31:27.857Z",
+      "archivedAt": null,
+      "branch": null,
+      "worktreePath": null,
+      "modelSelection": {
+        "instanceId": "codex",
+        "model": "gpt-5.6-sol"
+      },
+      "latestTurn": null,
+      "session": null,
+      "hasPendingApprovals": false,
+      "hasPendingUserInput": false,
+      "runtimeMode": "full-access",
+      "interactionMode": "default"
+    }
+  ]
+}

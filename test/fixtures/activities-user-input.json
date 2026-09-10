@@ -1,0 +1,115 @@
+[
+  {
+    "id": "d75b4816-51d2-4501-8817-6df6ccad164d",
+    "tone": "tool",
+    "kind": "tool.started",
+    "summary": "Tool call started",
+    "payload": {
+      "itemType": "dynamic_tool_call",
+      "toolCallId": "toolu_01NMrp5mJSFSf4oryqtzzwkD",
+      "status": "inProgress",
+      "title": "Tool call",
+      "detail": "AskUserQuestion: {}",
+      "data": {
+        "toolName": "AskUserQuestion"
+      }
+    },
+    "turnId": "9996a168-0683-44cc-b5dd-e60ab87019fa",
+    "createdAt": "2026-09-10T04:39:05.900Z"
+  },
+  {
+    "id": "475cb92d-0df4-4b25-b57c-5857bf90fb7c",
+    "tone": "info",
+    "kind": "user-input.requested",
+    "summary": "User input requested",
+    "payload": {
+      "requestId": "569a3330-ea19-410a-9242-fb20cd0094ae",
+      "questions": [
+        {
+          "id": "Which color do you prefer?",
+          "header": "Color",
+          "question": "Which color do you prefer?",
+          "options": [
+            {
+              "label": "Red",
+              "description": "Red"
+            },
+            {
+              "label": "Blue",
+              "description": "Blue"
+            }
+          ],
+          "multiSelect": false
+        }
+      ]
+    },
+    "turnId": "9996a168-0683-44cc-b5dd-e60ab87019fa",
+    "createdAt": "2026-09-10T04:39:06.451Z"
+  },
+  {
+    "id": "3805eb32-2983-4f92-afbc-af00284d8baf",
+    "tone": "info",
+    "kind": "user-input.resolved",
+    "summary": "User input submitted",
+    "payload": {
+      "requestId": "569a3330-ea19-410a-9242-fb20cd0094ae",
+      "answers": {
+        "Which color do you prefer?": "Blue"
+      }
+    },
+    "turnId": "9996a168-0683-44cc-b5dd-e60ab87019fa",
+    "createdAt": "2026-09-10T04:39:17.757Z"
+  },
+  {
+    "id": "7c906f10-7342-42af-a449-fd1021ab7956",
+    "tone": "tool",
+    "kind": "tool.completed",
+    "summary": "Tool call",
+    "payload": {
+      "itemType": "dynamic_tool_call",
+      "toolCallId": "toolu_01NMrp5mJSFSf4oryqtzzwkD",
+      "status": "completed",
+      "title": "Tool call",
+      "detail": "AskUserQuestion: {\"questions\":[{\"question\":\"Which color do you prefer?\",\"header\":\"Color\",\"options\":[{\"label\":\"Red\",\"description\":\"Red\"},{\"label\":\"Blue\",\"description\":\"Blue\"}],\"m...",
+      "data": {
+        "toolName": "AskUserQuestion"
+      }
+    },
+    "turnId": "9996a168-0683-44cc-b5dd-e60ab87019fa",
+    "createdAt": "2026-09-10T04:39:17.850Z"
+  },
+  {
+    "id": "cfa9b469-b9ee-4de1-8300-d8c381ba516f",
+    "tone": "tool",
+    "kind": "tool.updated",
+    "summary": "Tool call",
+    "payload": {
+      "itemType": "dynamic_tool_call",
+      "toolCallId": "toolu_01NMrp5mJSFSf4oryqtzzwkD",
+      "status": "inProgress",
+      "title": "Tool call",
+      "detail": "AskUserQuestion: {\"questions\":[{\"question\":\"Which color do you prefer?\",\"header\":\"Color\",\"options\":[{\"label\":\"Red\",\"description\":\"Red\"},{\"label\":\"Blue\",\"description\":\"Blue\"}],\"m...",
+      "data": {
+        "toolName": "AskUserQuestion"
+      }
+    },
+    "turnId": "9996a168-0683-44cc-b5dd-e60ab87019fa",
+    "createdAt": "2026-09-10T04:39:17.850Z"
+  },
+  {
+    "id": "77c05c8f-b1b9-42e2-b9ad-7a928194038c",
+    "tone": "info",
+    "kind": "context-window.updated",
+    "summary": "Context window updated",
+    "payload": {
+      "usedTokens": 29225,
+      "lastUsedTokens": 29225,
+      "totalProcessedTokens": 58388,
+      "inputTokens": 29224,
+      "outputTokens": 1,
+      "maxTokens": 200000
+    },
+    "turnId": "9996a168-0683-44cc-b5dd-e60ab87019fa",
+    "createdAt": "2026-09-10T04:39:19.646Z"
+  }
+]

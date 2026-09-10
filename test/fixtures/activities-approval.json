@@ -1,0 +1,95 @@
+[
+  {
+    "id": "e00bc8a8-7576-4a61-9f59-259c38763db1",
+    "tone": "tool",
+    "kind": "tool.started",
+    "summary": "File change started",
+    "payload": {
+      "itemType": "file_change",
+      "toolCallId": "toolu_01Xa79dhSByzKekF4wyMrFdS",
+      "status": "inProgress",
+      "detail": "Write: {}",
+      "data": {
+        "toolName": "Write"
+      }
+    },
+    "turnId": "616c6bd5-b439-4ec8-86c2-f8697d23e8b3",
+    "createdAt": "2026-09-06T08:47:47.947Z"
+  },
+  {
+    "id": "d6352f55-a726-4aef-a95e-5ed4972a99e9",
+    "tone": "approval",
+    "kind": "approval.requested",
+    "summary": "File-change approval requested",
+    "payload": {
+      "requestId": "b6741540-0a9e-4f35-856d-7e5ef00bc3c0",
+      "requestKind": "file-change",
+      "requestType": "file_change_approval",
+      "detail": "Write: {\"file_path\":\"/tmp/t3ctl-approval-test.txt\",\"content\":\"approved\\n\"}"
+    },
+    "turnId": "616c6bd5-b439-4ec8-86c2-f8697d23e8b3",
+    "createdAt": "2026-09-06T08:47:49.196Z"
+  },
+  {
+    "id": "f3039755-ef27-4961-8114-c3b850b06c45",
+    "tone": "approval",
+    "kind": "approval.resolved",
+    "summary": "Approval resolved",
+    "payload": {
+      "requestId": "b6741540-0a9e-4f35-856d-7e5ef00bc3c0",
+      "requestKind": "file-change",
+      "requestType": "file_change_approval",
+      "decision": "accept"
+    },
+    "turnId": "616c6bd5-b439-4ec8-86c2-f8697d23e8b3",
+    "createdAt": "2026-09-06T08:47:52.220Z"
+  },
+  {
+    "id": "57316975-3c2f-4e48-86d8-e1fe8fadf726",
+    "tone": "tool",
+    "kind": "tool.completed",
+    "summary": "File change",
+    "payload": {
+      "itemType": "file_change",
+      "toolCallId": "toolu_01Xa79dhSByzKekF4wyMrFdS",
+      "status": "completed",
+      "detail": "Write: {\"file_path\":\"/tmp/t3ctl-approval-test.txt\",\"content\":\"approved\\n\"}",
+      "data": {
+        "toolName": "Write"
+      }
+    },
+    "turnId": "616c6bd5-b439-4ec8-86c2-f8697d23e8b3",
+    "createdAt": "2026-09-06T08:47:52.323Z"
+  },
+  {
+    "id": "b0dd8e95-18a1-4306-8a92-5240c8eb193d",
+    "tone": "tool",
+    "kind": "tool.updated",
+    "summary": "File change",
+    "payload": {
+      "itemType": "file_change",
+      "toolCallId": "toolu_01Xa79dhSByzKekF4wyMrFdS",
+      "status": "inProgress",
+      "detail": "Write: {\"file_path\":\"/tmp/t3ctl-approval-test.txt\",\"content\":\"approved\\n\"}",
+      "data": {}
+    },
+    "turnId": "616c6bd5-b439-4ec8-86c2-f8697d23e8b3",
+    "createdAt": "2026-09-06T08:47:52.323Z"
+  },
+  {
+    "id": "e961e835-5992-4354-907e-93b892e44ced",
+    "tone": "info",
+    "kind": "context-window.updated",
+    "summary": "Context window updated",
+    "payload": {
+      "usedTokens": 42276,
+      "lastUsedTokens": 42276,
+      "totalProcessedTokens": 84468,
+      "inputTokens": 42275,
+      "outputTokens": 1,
+      "maxTokens": 1000000
+    },
+    "turnId": "616c6bd5-b439-4ec8-86c2-f8697d23e8b3",
+    "createdAt": "2026-09-06T08:47:53.367Z"
+  }
+]
