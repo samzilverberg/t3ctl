@@ -1,7 +1,8 @@
 {
   "name": "t3ctl",
-  "version": "0.0.6",
+  "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Local CLI for controlling an already-running T3 Code app",
   "type": "module",
   "bin": {
@@ -18,6 +19,7 @@
   },
   "dependencies": {
     "commander": "^14.0.0",
+    "croner": "^10.0.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {

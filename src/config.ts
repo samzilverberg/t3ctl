@@ -26,7 +26,7 @@ export interface Config {
   modelAliases?: Record<string, string>;
 }
 
-/** Our own short names. The server's own `opus`/`sonnet` aliases point at the 5.x line; Sam wants these. */
+/** Our own short names. The server's own `opus`/`sonnet` aliases point at the 5.x line; these pin the previous generation. */
 export const BUILTIN_MODEL_ALIASES: Record<string, string> = {
   opus: "claude-opus-4-8",
   fable: "claude-fable-5-1",

@@ -26,7 +26,8 @@ start a T3 server. README.md holds the user docs and protocol research; this fil
 
 ```
 src/index.ts        commander program, global flags
-src/commands/*.ts   one file per top-level command group (env, auth, models, projects, threads)
+src/commands/*.ts   one file per top-level command group (env, auth, models, projects, threads, schedule)
+src/ops.ts          createThread / startTurn shared by `threads new|send` and the scheduler
 src/discover.ts     find the server (config → server-runtime.json → probe :3773) via /.well-known/t3/environment
 src/auth.ts         pairing, token exchange, auto re-pair (ensureToken)
 src/keychain.ts     macOS `security` wrapper
@@ -35,7 +36,9 @@ src/ws.ts           minimal Effect-RPC-over-WebSocket client (Request/Chunk/Ack/
 src/models.ts       provider catalog, alias + fuzzy model resolution, option validation
 src/wait.ts         wait-for-idle from the thread stream + shell polling
 src/pending.ts      derive open approval / user-input requests from activities
-src/time.ts         "when" parser for snooze
+src/time.ts         "when" parser for snooze and one-shot schedules
+src/schedule.ts     job store (~/.config/t3ctl/schedule.json), cron evaluation (croner), grace/overlap rules, lock
+src/launchd.ts      LaunchAgent plist for `schedule tick` (label dev.t3ctl.scheduler)
 skills/t3ctl        agent skill; symlinked at ~/.claude/skills/t3ctl (edits are live immediately)
 docs/research       protocol notes from the upstream source
 ```
@@ -64,6 +67,11 @@ id=$(t3ctl threads new -p dev -m sonnet -e low -t "t3ctl e2e <feature>" "Reply w
 t3ctl threads wait "$id" --timeout 120
 t3ctl threads archive "$id"               # always clean up smoke threads
 ```
+
+Scheduler: `t3ctl schedule add 1m -p dev -m sonnet -e low "Reply with exactly OK."`, then either wait for the
+installed ticker (`tail ~/.config/t3ctl/scheduler.log`) or run `t3ctl schedule tick` by hand. To test the late
+path, backdate `nextAt` in `schedule.json`; to test overlap, schedule `* * * * *` against a thread whose turn runs
+longer than a minute. Remove test jobs afterwards (`schedule remove <id>`).
 
 Approval paths: create with `--runtime-mode approval-required` and a prompt that writes a file under `/tmp`;
 `threads pending` → `threads approve`. Snooze paths: `--draft --snooze 2h` then `unsnooze`. Never test writes

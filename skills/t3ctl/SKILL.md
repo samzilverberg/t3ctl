@@ -45,6 +45,9 @@ Only if it prints "t3 auth pairing create failed" should you tell the user to ch
 | Create without starting | `t3ctl threads new -p <project> --draft -t "<title>" [--snooze 2h]` |
 | Done for now / tidy | `t3ctl threads settle <ref>` (keeps it, leaves inbox), `t3ctl threads archive <ref>`, `t3ctl threads interrupt <ref>` |
 | Register a repo | `t3ctl projects add <path> [-m model -e effort]` |
+| Run later / on a cron | `t3ctl schedule add "<when>" -p <project> [-m model -e effort -t title] "<prompt>"` → `{id, nextAt, tickerInstalled}`; `<when>` = `30m`, `"tomorrow 09:00"`, ISO, or cron (`"0 9 * * 1-5"`, `@daily`) |
+| Scheduled follow-up | `t3ctl schedule add "<when>" --thread <ref> "<prompt>"` |
+| See / cancel schedules | `t3ctl schedule` (pending jobs, last run, ticker status) · `t3ctl schedule remove <id>` |
 
 Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high --stdin`.
 
@@ -66,8 +69,11 @@ Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high
 - Never `interrupt`/`archive` a thread you did not create unless the user names it explicitly.
 - Do not send a message to a `running` thread; `wait` first.
 - Each `threads new` (without `--draft`) starts a paid agent turn. One thread per task; use `send` for follow-ups.
-- Snooze hides a thread; it does not delay or schedule work. To run a task later, schedule it in the planner and
-  call `threads new` when it is due.
+- Snooze hides a thread; it does not delay or schedule work. To run a task later use `schedule add`. The thread id
+  only exists after the job fires: read it from `t3ctl schedule -a` (`runs[].threadId`).
+- Scheduler rules are fixed: one fire per occurrence, missed occurrences dropped, late fires skipped after the grace
+  window (60m or half the cron interval), recurring jobs skip while the previous run's thread is running or waiting
+  on a human. If `tickerInstalled` is false, tell the user to run `t3ctl schedule install`.
 - Omitting `-m` uses the config default (`opus` = Opus 4.8), then the project default.
 
 ## Obsidian handoff (vault `notes-obsidian`, folder `_planner/`; full contract in `_planner/conventions.md`)

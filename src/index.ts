@@ -8,6 +8,7 @@ import { registerAuth } from "./commands/auth.js";
 import { registerProjects } from "./commands/projects.js";
 import { registerThreads } from "./commands/threads.js";
 import { registerModels } from "./commands/models.js";
+import { registerSchedule } from "./commands/schedule.js";
 
 const program = new Command()
   .name("t3ctl")
@@ -23,6 +24,7 @@ registerAuth(program);
 registerProjects(program);
 registerThreads(program);
 registerModels(program);
+registerSchedule(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const msg = err instanceof Error ? err.message : String(err);

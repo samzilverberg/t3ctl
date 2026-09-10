@@ -4,7 +4,7 @@ Local CLI for controlling an **already-running** T3 Code app. Never starts a ser
 TypeScript, Node ≥22, pnpm, two runtime deps (`commander`, `ws`). Token in macOS Keychain,
 config in `~/.config/t3ctl/config.json`.
 
-Status: v0.0.3 — reads, thread management, approvals, projects. Verified against T3 Code 0.0.38 on 2026-09-06.
+Status: v0.1.0 — reads, thread management, approvals, projects, launchd-backed scheduler. Verified against T3 Code 0.0.40 on 2026-09-10.
 
 ```
 t3ctl env                                  # which server we target (no auth)
@@ -32,12 +32,15 @@ t3ctl threads snooze <ref> -u <when> | unsnooze <ref>            # sidebar visib
 t3ctl threads new … --draft [--snooze <when>]                    # create without starting a turn
 t3ctl threads settle|unsettle <ref>
 t3ctl threads interrupt|archive|unarchive <ref>
+t3ctl schedule add <when> -p <project> [-m model] [-e effort] [-t title] [--env …] [--grace 30m] "<prompt>"
+t3ctl schedule add <when> --thread <ref> [-m model] [-e effort] "<prompt>"    # follow-up instead of new thread
+t3ctl schedule [list] [-a] | remove <id> | tick | install | uninstall
 ```
 
 `<when>` = ISO, `30m`/`2h`/`3d`/`1w`, `HH:MM` (today, else tomorrow), or `"tomorrow [HH:MM]"` (default 09:00).
 
-Verified live: everything above except `threads respond` (user-input questions), whose payload mirrors the
-web client's `derivePendingUserInputs` but has not yet been exercised against a real prompt.
+Everything above is verified live, including `threads respond` (AskUserQuestion-style prompts) and the scheduler
+(one-shot fire, late skip, recurring overlap skip) via the launchd ticker.
 
 Global: `--origin <url>`, `-f json|table`, `--no-auto-pair`. Output is JSON when stdout is not a TTY or
 `T3CTL_AGENT=1`. `T3CTL_TOKEN` overrides the Keychain. `<ref>` = id, id prefix, or exact title (projects
@@ -72,8 +75,40 @@ Built-in runtime mode default is `auto` (T3 Code's own default is `full-access`)
 T3's `thread.snooze` only hides the thread from the sidebar until `snoozedUntil` (the decider comment: "snooze
 only affects visibility, never the agent"). A running turn keeps running; a draft stays a draft. The server
 rejects snoozing a thread with a pending approval/user-input or a still-queued turn, so `new --snooze` waits for
-the turn to be adopted before snoozing. There is no server-side deferred start; to run something later use the
-planner (Obsidian scheduled task → `t3ctl threads new` when due) or a cron/launchd job.
+the turn to be adopted before snoozing. There is no server-side deferred start; that is what `t3ctl schedule` is for.
+
+### Scheduler
+
+`t3ctl schedule` runs threads later or on a cron, client-side. Jobs live in `~/.config/t3ctl/schedule.json`; a
+LaunchAgent (`dev.t3ctl.scheduler`, installed once with `t3ctl schedule install`) runs `t3ctl schedule tick` every
+60 s while you are logged in and appends one line per action to `~/.config/t3ctl/scheduler.log`. The plist
+hardcodes the current `node` and `dist/index.js` paths, so re-run `install` if either moves.
+
+```
+t3ctl schedule add "tomorrow 09:00" -p mono -m opus -e high -t "Nightly triage" "Triage open issues…"
+t3ctl schedule add "0 9 * * 1-5" -p mono "Weekday morning: …"        # cron → recurring, new thread each time
+t3ctl schedule add @hourly --thread <ref> "Check the board and report"  # recurring follow-up into one thread
+t3ctl schedule                                                         # pending jobs + ticker status
+t3ctl schedule remove <id>
+```
+
+`<when>` is either a one-shot (`30m`, `2h`, `HH:MM`, `"tomorrow 09:00"`, ISO) or a cron expression (5 fields,
+or `@hourly` / `@daily` / `@weekly`; local time zone). Targets and model refs are validated when you `add`.
+
+Fixed rules, no knobs beyond `--grace`:
+
+- **At most one fire per occurrence, never replayed.** Missed occurrences (Mac asleep, logged out) are dropped;
+  only the most recent due one is considered when the ticker next runs.
+- **Grace window.** An occurrence fires only if the ticker reaches it within `--grace` of its time (default 60 m,
+  or half the cron interval if smaller). Otherwise it is recorded as `skipped (late by …)`.
+- **No overlap.** A recurring job skips an occurrence while the thread from its previous run is `running` or
+  waiting on a human (`needs-approval` / `needs-input`). Resolve the pending request to unblock it.
+- **Failures stick.** A failed fire (project gone, model retired, server down) is recorded with its reason and not
+  retried; the recurring job moves on to its next occurrence. `schedule list -a` shows finished one-shots too.
+
+Limitations: launchd cannot wake a sleeping Mac, so "09:00" means "the first minute the Mac is awake and you are
+logged in at or after 09:00, within grace". If the desktop app is closed the ticker falls back to the background
+service (if installed); the UI catches up from SQLite when reopened.
 
 ### Model references
 
@@ -215,9 +250,8 @@ later `*.resolved` activity is open. `threads wait` reports `needs-human` from t
 
 ## Roadmap
 
-1. Exercise `threads respond` against a real user-input prompt.
-2. Multi-environment Keychain entries (`--origin https://…` already works for one remote server at a time).
-3. `threads diff <ref>` via `orchestration.getFullThreadDiff`.
+1. Multi-environment Keychain entries (`--origin https://…` already works for one remote server at a time).
+2. Tests against a recorded server fixture (currently validated live only).
 
 ## Obsidian integration
 
