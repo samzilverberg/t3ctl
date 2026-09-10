@@ -8,6 +8,7 @@ import { RpcSocket } from "../ws.js";
 import { buildModelSelection, fetchProviders, fetchServerSettings, resolveModel, type ModelSelection } from "../models.js";
 import { nowIso, tempBranchName, uuid } from "../ids.js";
 import { readConfig } from "../config.js";
+import { parseWhen } from "../time.js";
 import { threadStatus, waitForIdle } from "../wait.js";
 import { derivePendingApprovals, derivePendingUserInputs, type Activity } from "../pending.js";
 
@@ -183,17 +184,22 @@ export function registerThreads(program: Command) {
     .option("--stdin", "read prompt from stdin", false)
     .option("--wait", "wait for the first turn to finish and print the result", false)
     .option("--timeout <seconds>", "with --wait", (v) => Number(v), 1800)
-    .action(async (promptArg: string | undefined, o: { project: string; model?: string; effort?: string; contextWindow?: string; fast?: boolean; title?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; setupScript: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
+    .option("--draft", "create the thread without sending a message (no agent turn starts)", false)
+    .option("--snooze <when>", "hide the thread from the sidebar until <when> (ISO, 30m/2h/3d, HH:MM, \"tomorrow 09:00\"). Visibility only: a started turn keeps running.")
+    .action(async (promptArg: string | undefined, o: { draft: boolean; snooze?: string; project: string; model?: string; effort?: string; contextWindow?: string; fast?: boolean; title?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; setupScript: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g, { write: true });
       const d = readConfig().defaults ?? {};
       o.runtimeMode = o.runtimeMode ?? (d.runtimeMode as RuntimeMode | undefined) ?? "auto";
       o.interactionMode = o.interactionMode ?? (d.interactionMode as InteractionMode | undefined) ?? "default";
+      // Model resolution order: -m flag → config defaults.model → project default → server default.
       o.model = o.model ?? d.model; o.effort = o.effort ?? d.effort; o.env = o.env ?? d.env;
       const runtimeMode = o.runtimeMode; const interactionMode = o.interactionMode;
       if (!RUNTIME_MODES.includes(runtimeMode)) throw new Error(`invalid --runtime-mode. Allowed: ${RUNTIME_MODES.join(", ")}`);
       if (!INTERACTION_MODES.includes(interactionMode)) throw new Error(`invalid --interaction-mode. Allowed: ${INTERACTION_MODES.join(", ")}`);
-      const text = readPrompt(promptArg, o);
+      const snoozedUntil = o.snooze ? parseWhen(o.snooze) : undefined;
+      const text = o.draft ? (promptArg ?? "") : readPrompt(promptArg, o);
+      if (o.draft && !o.title && !text) throw new Error("--draft needs -t <title> (or a prompt to derive it from)");
       const shell = await withAuthRetry(ctx, g, api.shell);
       const project = matchProject(shell.projects, o.project);
 
@@ -227,24 +233,31 @@ export function registerThreads(program: Command) {
       const threadId = uuid();
       const createdAt = nowIso();
       const title = (o.title ?? text.split("\n")[0]).trim().slice(0, 80) || "Untitled";
-      const command = {
+      const command = o.draft
+        ? { type: "thread.create", commandId: uuid(), threadId, projectId: project.id, title, modelSelection, runtimeMode, interactionMode, branch: useWorktree ? worktreeBranch : (currentBranch ?? null), worktreePath: null, createdAt }
+        : {
         type: "thread.turn.start",
         commandId: uuid(),
         threadId,
         message: { messageId: uuid(), role: "user", text, attachments: [] },
         modelSelection,
-        runtimeMode: runtimeMode,
-        interactionMode: interactionMode,
+        runtimeMode,
+        interactionMode,
         bootstrap: {
-          createThread: { projectId: project.id, title, modelSelection, runtimeMode: runtimeMode, interactionMode: interactionMode, branch: useWorktree ? worktreeBranch : (currentBranch ?? null), worktreePath: null, createdAt },
+          createThread: { projectId: project.id, title, modelSelection, runtimeMode, interactionMode, branch: useWorktree ? worktreeBranch : (currentBranch ?? null), worktreePath: null, createdAt },
           ...(useWorktree && baseBranch ? { prepareWorktree: { projectCwd: project.workspaceRoot, baseBranch, branch: worktreeBranch, ...(startFromOrigin ? { startFromOrigin: true } : {}) }, runSetupScript: o.setupScript } : {}),
         },
         createdAt,
       };
       const res = await withAuthRetry(ctx, g, (c) => dispatch(c, command));
-      const summary = { threadId, projectId: project.id, project: project.title, title, modelSelection, runtimeMode: runtimeMode, interactionMode: interactionMode, env: useWorktree ? "worktree" : "local", branch: useWorktree ? worktreeBranch : currentBranch ?? null, baseBranch: useWorktree ? baseBranch : null, sequence: res.sequence, url: `${ctx.server.origin}/thread/${threadId}` };
-      if (!o.wait) {
-        emit(ctx.format, summary, () => `created ${threadId}\nproject  ${project.title}\ntitle    ${title}\nmodel    ${modelSelection.instanceId}/${modelSelection.model}${effortOf(modelSelection) ? "@" + effortOf(modelSelection) : ""}\nenv      ${summary.env}${useWorktree ? ` (${worktreeBranch} from ${baseBranch})` : ""}`);
+      if (snoozedUntil) {
+        // The decider rejects snoozing a thread whose turn is still queued (not yet adopted by a session).
+        if (!o.draft) await waitForTurnAdopted(ctx.client, threadId, 60_000);
+        await dispatch(ctx.client, { type: "thread.snooze", commandId: uuid(), threadId, snoozedUntil });
+      }
+      const summary = { threadId, projectId: project.id, project: project.title, title, modelSelection, runtimeMode, interactionMode, env: useWorktree ? "worktree" : (o.draft ? "local (draft)" : "local"), branch: useWorktree ? worktreeBranch : currentBranch ?? null, baseBranch: useWorktree ? baseBranch : null, draft: o.draft, snoozedUntil: snoozedUntil ?? null, sequence: res.sequence, url: `${ctx.server.origin}/thread/${threadId}` };
+      if (!o.wait || o.draft) {
+        emit(ctx.format, summary, () => `created ${threadId}${o.draft ? " (draft, no turn started)" : ""}\nproject  ${project.title}\ntitle    ${title}\nmodel    ${modelSelection.instanceId}/${modelSelection.model}${effortOf(modelSelection) ? "@" + effortOf(modelSelection) : ""}\nenv      ${summary.env}${useWorktree ? ` (${worktreeBranch} from ${baseBranch})` : ""}${snoozedUntil ? `\nsnoozed  until ${snoozedUntil}` : ""}`);
         return;
       }
       const out = await waitForIdle(ctx.server, ctx.client.token, threadId, { timeoutMs: o.timeout * 1000, requireTurnStart: true, poll: shellPoller(ctx.client, threadId) });
@@ -364,6 +377,32 @@ export function registerThreads(program: Command) {
     });
 
   threads
+    .command("snooze <ref>")
+    .description("Hide a thread from the sidebar until <when>. Visibility only: a running agent keeps running. Rejected while the thread has a pending approval/user-input.")
+    .requiredOption("-u, --until <when>", "ISO, 30m/2h/3d/1w, HH:MM, or \"tomorrow [HH:MM]\"")
+    .action(async (ref: string, o: { until: string }) => {
+      const g = program.opts<GlobalOpts>();
+      const ctx = await connect(g, { write: true });
+      const snoozedUntil = parseWhen(o.until);
+      const shell = await withAuthRetry(ctx, g, api.shell);
+      const t = matchThread(shell.threads, ref);
+      const res = await dispatch(ctx.client, { type: "thread.snooze", commandId: uuid(), threadId: t.id, snoozedUntil });
+      emit(ctx.format, { threadId: t.id, snoozedUntil, sequence: res.sequence }, () => `snoozed ${t.id} until ${snoozedUntil}`);
+    });
+
+  threads
+    .command("unsnooze <ref>")
+    .description("Bring a snoozed thread back now")
+    .action(async (ref: string) => {
+      const g = program.opts<GlobalOpts>();
+      const ctx = await connect(g, { write: true });
+      const shell = await withAuthRetry(ctx, g, api.shell);
+      const t = matchThread(shell.threads, ref);
+      const res = await dispatch(ctx.client, { type: "thread.unsnooze", commandId: uuid(), threadId: t.id, reason: "user" });
+      emit(ctx.format, { threadId: t.id, sequence: res.sequence }, () => `unsnoozed ${t.id}`);
+    });
+
+  threads
     .command("interrupt <ref>")
     .description("Interrupt the running turn")
     .action(async (ref: string) => {
@@ -388,6 +427,17 @@ export function registerThreads(program: Command) {
         emit(ctx.format, { threadId: t.id, sequence: res.sequence }, () => `${name}d ${t.id}`);
       });
   }
+}
+
+/** Poll until the thread's first turn has been adopted by a provider session (or finished). */
+async function waitForTurnAdopted(client: import("../http.js").Client, threadId: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const t = (await api.shell(client)).threads.find((x) => x.id === threadId);
+    if (t && (t.session?.activeTurnId || (t.latestTurn?.state && t.latestTurn.state !== "requested"))) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error("timed out waiting for the turn to be adopted; thread created but not snoozed");
 }
 
 function effortOf(ms?: { options?: Array<{ id: string; value: unknown }> }): string | undefined {

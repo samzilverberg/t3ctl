@@ -27,8 +27,12 @@ t3ctl threads send <ref> [-m model] [-e effort] [--wait] "<prompt>"
 t3ctl threads pending <ref>                                  # open approval / user-input requests
 t3ctl threads approve <ref> [-d accept|acceptForSession|acceptAlways|decline] [-r requestId]
 t3ctl threads respond <ref> -a <questionId>=<answer> … | --json '{…}'
+t3ctl threads snooze <ref> -u <when> | unsnooze <ref>            # sidebar visibility only
+t3ctl threads new … --draft [--snooze <when>]                    # create without starting a turn
 t3ctl threads interrupt|archive|unarchive <ref>
 ```
+
+`<when>` = ISO, `30m`/`2h`/`3d`/`1w`, `HH:MM` (today, else tomorrow), or `"tomorrow [HH:MM]"` (default 09:00).
 
 Verified live: everything above except `threads respond` (user-input questions), whose payload mirrors the
 web client's `derivePendingUserInputs` but has not yet been exercised against a real prompt.
@@ -57,7 +61,17 @@ build is live immediately). Dev loop without building: `pnpm dev <args>`.
 { "defaults": { "runtimeMode": "auto", "interactionMode": "default", "model": "opus", "effort": "high", "env": "worktree" } }
 ```
 
-Built-in runtime mode default is `auto` (T3 Code's own default is `full-access`).
+Built-in runtime mode default is `auto` (T3 Code's own default is `full-access`). Model resolution order for
+`threads new`: `-m` → `defaults.model` → project default → server default. Your config currently sets
+`defaults.model: "opus"` (= Opus 4.8).
+
+### Snooze is not scheduling
+
+T3's `thread.snooze` only hides the thread from the sidebar until `snoozedUntil` (the decider comment: "snooze
+only affects visibility, never the agent"). A running turn keeps running; a draft stays a draft. The server
+rejects snoozing a thread with a pending approval/user-input or a still-queued turn, so `new --snooze` waits for
+the turn to be adopted before snoozing. There is no server-side deferred start; to run something later use the
+planner (Obsidian scheduled task → `t3ctl threads new` when due) or a cron/launchd job.
 
 ### Model references
 
@@ -73,7 +87,7 @@ Prefix with `instanceId/` to pin a provider. Built-in aliases deliberately diffe
 | `sonnet` | `claude-sonnet-4-6` |
 
 Override or extend via `"modelAliases": { "opus": "claude-opus-5", "cheap": "haiku" }` in config.json.
-`t3ctl models -a` marks t3ctl aliases with `*` in the aliases column (legacy models are hidden without `-a`).
+`t3ctl models` lists legacy models too (`--no-legacy` hides them, `-a` adds disabled providers) and marks t3ctl aliases with `*`.
 
 ### Token lifetime and re-pairing
 

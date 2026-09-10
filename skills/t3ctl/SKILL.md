@@ -41,6 +41,8 @@ Only if it prints "t3 auth pairing create failed" should you tell the user to ch
 | What is it blocked on | `t3ctl threads pending <ref>` → `{approvals:[{requestId,requestKind,detail,options}], userInputs:[{requestId,questions:[{id,question,options:[{label}]}]}]}` |
 | Approve / decline | `t3ctl threads approve <ref> -d accept` (or `decline`, `acceptForSession`, `acceptAlways`; `-r <requestId>` to pick one) |
 | Answer questions | `t3ctl threads respond <ref> -a <questionId>=<option label> …` |
+| Hide until later (visibility only) | `t3ctl threads snooze <ref> -u "tomorrow 09:00"` / `t3ctl threads unsnooze <ref>` |
+| Create without starting | `t3ctl threads new -p <project> --draft -t "<title>" [--snooze 2h]` |
 | Stop / tidy | `t3ctl threads interrupt <ref>`, `t3ctl threads archive <ref>` |
 | Register a repo | `t3ctl projects add <path> [-m model -e effort]` |
 
@@ -63,7 +65,10 @@ Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high
   approve yourself when the user has pre-authorised that class of action for the task; otherwise report and stop.
 - Never `interrupt`/`archive` a thread you did not create unless the user names it explicitly.
 - Do not send a message to a `running` thread; `wait` first.
-- Each `threads new` starts a paid agent turn. One thread per task; use `send` for follow-ups.
+- Each `threads new` (without `--draft`) starts a paid agent turn. One thread per task; use `send` for follow-ups.
+- Snooze hides a thread; it does not delay or schedule work. To run a task later, schedule it in the planner and
+  call `threads new` when it is due.
+- Omitting `-m` uses the config default (`opus` = Opus 4.8), then the project default.
 
 ## Obsidian handoff (vault `notes-obsidian`, folder `_planner/`; full contract in `_planner/conventions.md`)
 

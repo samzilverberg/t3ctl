@@ -8,14 +8,15 @@ export function registerModels(program: Command) {
   program
     .command("models")
     .description("List models available on enabled providers, with their option values (effort etc.)")
-    .option("-a, --all", "include legacy models and disabled providers", false)
-    .action(async (o: { all: boolean }) => {
+    .option("-a, --all", "include disabled providers too", false)
+    .option("--no-legacy", "hide models the server marks legacy")
+    .action(async (o: { all: boolean; legacy: boolean }) => {
       const { client, server, format } = await connect(program.opts<GlobalOpts>());
       const providers = await fetchProviders(server, client.token);
       const aliases = modelAliases();
       const rows = providers
         .filter((p) => o.all || p.enabled)
-        .flatMap((p) => p.models.filter((m) => o.all || !m.isLegacy).map((m) => {
+        .flatMap((p) => p.models.filter((m) => o.legacy || !m.isLegacy).map((m) => {
           const opt = (id: string) => (m.capabilities?.optionDescriptors ?? []).find((d) => d.id === id);
           return {
             instanceId: p.instanceId,
@@ -29,6 +30,6 @@ export function registerModels(program: Command) {
             legacy: Boolean(m.isLegacy),
           };
         }));
-      emit(format, rows, () => renderTable(rows, ["instanceId", "status", "model", "aliases", "effort", "contextWindow", "fastMode"]) + "\n(* = default option / t3ctl alias)");
+      emit(format, rows, () => renderTable(rows, ["instanceId", "status", "model", "aliases", "effort", "contextWindow", "fastMode", "legacy"]) + "\n(* = default option / t3ctl alias)");
     });
 }
