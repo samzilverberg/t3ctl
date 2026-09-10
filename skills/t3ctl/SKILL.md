@@ -43,7 +43,7 @@ Only if it prints "t3 auth pairing create failed" should you tell the user to ch
 | Answer questions | `t3ctl threads respond <ref> -a <questionId>=<option label> …` |
 | Hide until later (visibility only) | `t3ctl threads snooze <ref> -u "tomorrow 09:00"` / `t3ctl threads unsnooze <ref>` |
 | Create without starting | `t3ctl threads new -p <project> --draft -t "<title>" [--snooze 2h]` |
-| Stop / tidy | `t3ctl threads interrupt <ref>`, `t3ctl threads archive <ref>` |
+| Done for now / tidy | `t3ctl threads settle <ref>` (keeps it, leaves inbox), `t3ctl threads archive <ref>`, `t3ctl threads interrupt <ref>` |
 | Register a repo | `t3ctl projects add <path> [-m model -e effort]` |
 
 Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high --stdin`.

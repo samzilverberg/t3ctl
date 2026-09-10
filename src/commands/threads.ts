@@ -414,6 +414,30 @@ export function registerThreads(program: Command) {
       emit(ctx.format, { threadId: t.id, sequence: res.sequence }, () => `interrupt requested for ${t.id}`);
     });
 
+  threads
+    .command("settle <ref>")
+    .description("Mark a thread settled (T3's 'done for now' state; hides from the active inbox)")
+    .action(async (ref: string) => {
+      const g = program.opts<GlobalOpts>();
+      const ctx = await connect(g, { write: true });
+      const shell = await withAuthRetry(ctx, g, api.shell);
+      const t = matchThread(shell.threads, ref);
+      const res = await dispatch(ctx.client, { type: "thread.settle", commandId: uuid(), threadId: t.id });
+      emit(ctx.format, { threadId: t.id, sequence: res.sequence }, () => `settled ${t.id}`);
+    });
+
+  threads
+    .command("unsettle <ref>")
+    .description("Return a settled thread to the active inbox")
+    .action(async (ref: string) => {
+      const g = program.opts<GlobalOpts>();
+      const ctx = await connect(g, { write: true });
+      const shell = await withAuthRetry(ctx, g, api.shell);
+      const t = matchThread(shell.threads, ref);
+      const res = await dispatch(ctx.client, { type: "thread.unsettle", commandId: uuid(), threadId: t.id, reason: "user" });
+      emit(ctx.format, { threadId: t.id, sequence: res.sequence }, () => `unsettled ${t.id}`);
+    });
+
   for (const [name, type] of [["archive", "thread.archive"], ["unarchive", "thread.unarchive"]] as const) {
     threads
       .command(`${name} <ref>`)

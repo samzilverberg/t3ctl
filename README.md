@@ -29,6 +29,7 @@ t3ctl threads approve <ref> [-d accept|acceptForSession|acceptAlways|decline] [-
 t3ctl threads respond <ref> -a <questionId>=<answer> … | --json '{…}'
 t3ctl threads snooze <ref> -u <when> | unsnooze <ref>            # sidebar visibility only
 t3ctl threads new … --draft [--snooze <when>]                    # create without starting a turn
+t3ctl threads settle|unsettle <ref>
 t3ctl threads interrupt|archive|unarchive <ref>
 ```
 
