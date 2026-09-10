@@ -15,7 +15,7 @@ t3ctl projects [list|show <ref>]
 t3ctl projects add <path> [-t title] [-m model] [-e effort] [--create-dir]
 t3ctl projects remove <ref> [--force]
 t3ctl threads [list] [-p project] [-s status] [-a] [-n N]
-t3ctl threads -i <id,id,…>                                   # status report for known ids (Obsidian sync)
+t3ctl threads -i <id,id,…>                                   # status report for known ids (tracker sync)
 t3ctl threads show <ref> [-t turns]
 t3ctl threads search <query>
 t3ctl threads watch <ref> [--timeout s]                      # raw NDJSON event stream
@@ -253,20 +253,20 @@ later `*.resolved` activity is open. `threads wait` reports `needs-human` from t
 1. Multi-environment Keychain entries (`--origin https://…` already works for one remote server at a time).
 2. Tests against a recorded server fixture (currently validated live only).
 
-## Obsidian integration
+## Optional: pairing with a task tracker
 
-Implemented as conventions, not code: `_planner/conventions.md` in the vault has a "T3 Code delegation" section
-and `skills/t3ctl/SKILL.md` (symlinked to `~/.claude/skills/t3ctl`, so every Claude session sees it) tells agents
-how to use it. Summary:
+t3ctl is tracker-agnostic. If you run tasks from a notes app or tracker (Obsidian, a markdown planner, Jira…),
+pair them by convention rather than code:
 
-- **Task ↔ thread pairing**: store the thread id on the task note as frontmatter, e.g.
-  `t3-thread: <uuid>`, `t3-project: mono`, `t3-status: running|idle|needs-human|done`, `t3-updated: <iso>`.
-  `threads new` prints the id (JSON `threadId`); the agent writes it with the Obsidian CLI. Reverse lookup
-  is `t3ctl threads search "<note title>"` or by putting the note path in the first prompt line.
-- **Model / effort choice**: default from frontmatter (`t3-model: sonnet`, `t3-effort: low`) with a per-vault
-  policy in the skill: small chores → `sonnet@low`, code changes → `opus@high`, research/design → `fable@xhigh`.
-  Absent frontmatter → project default.
-- **Progress**: `t3ctl threads show <id> -t 1` for the latest assistant message; `t3ctl threads wait <id>`
-  (exit code) for blocking flows; `-s needs-approval` listing for a "needs me" view.
-- **Skill exposure**: symlink `skills/t3ctl` into `~/.claude/skills/t3ctl` so every Claude session (user scope)
-  discovers it; T3 Code sessions see it the same way via the home-directory Claude config.
+- **Task ↔ thread pairing**: store the thread id on the task (frontmatter or a field), e.g. `t3-thread: <uuid>`,
+  `t3-status: running|idle|needs-human|done`, `t3-updated: <iso>`. `threads new` prints `threadId` as JSON; the
+  agent writes it back with whatever CLI/API the tracker has. Reverse lookup: `t3ctl threads search "<title>"`
+  or put the task reference in the first prompt line.
+- **Model / effort choice**: per-task fields (`t3-model: sonnet`, `t3-effort: low`) or a policy in your agent
+  instructions, e.g. small chores → `sonnet@low`, code changes → `opus@high`, research/design → `fable@xhigh`.
+  Absent → project default.
+- **Progress**: `t3ctl threads -i <ids>` for a batch status report, `threads show <id> -t 1` for the latest
+  assistant message, `threads wait <id>` (exit code) for blocking flows, `threads -s needs-approval` for a
+  "needs me" view. `schedule add` covers deferred and recurring tasks without any tracker.
+- **Skill exposure**: symlink `skills/t3ctl` into `~/.claude/skills/t3ctl` so every Claude Code session (user
+  scope) discovers it, including sessions running inside T3 Code.

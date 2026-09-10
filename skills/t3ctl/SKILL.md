@@ -76,12 +76,16 @@ Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high
   on a human. If `tickerInstalled` is false, tell the user to run `t3ctl schedule install`.
 - Omitting `-m` uses the config default (`opus` = Opus 4.8), then the project default.
 
-## Obsidian handoff (vault `notes-obsidian`, folder `_planner/`; full contract in `_planner/conventions.md`)
+## Optional: driving t3ctl from a task tracker
 
-- Task-note frontmatter: `t3-thread`, `t3-status` (running|idle|needs-human|error|done), `t3-updated`,
-  optional `t3-model`, `t3-effort`. Checkbox tasks: inline `[t3:: <uuid>]`, status `[/]` while delegated.
-- Delegate: read the note → `t3ctl threads new -p <project> -m <model> -e <effort> -t "<task title>" "<prompt with
-  note path + deliverable>"` → write `t3-thread` + `t3-status: running` immediately (`obsidian property:set`).
-- Sync (daily loop): gather all ids → `t3ctl threads -i id1,id2,…` → surface `needs-human` first, then `idle`
-  (review `t3ctl threads show <id> -t 1`), then `running`; update `t3-status`/`t3-updated`.
-- Close: `t3-status: done`, complete the task, `t3ctl threads archive <id>`. Archive only planner-referenced threads.
+t3ctl does not know about any notes app or tracker. If the user runs tasks from one (Obsidian, a markdown
+planner, an issue tracker), the pairing is a convention you keep in that tool:
+
+- Store the thread id on the task (e.g. frontmatter/field `t3-thread: <uuid>`, plus `t3-status`, `t3-updated`).
+  `threads new` and `schedule -a` print ids as JSON.
+- Delegate: `t3ctl threads new -p <project> -m <model> -e <effort> -t "<task title>" "<prompt incl. task
+  reference + deliverable>"`, then record the id and `t3-status: running` right away.
+- Sync loop: `t3ctl threads -i id1,id2,…` for all tracked ids → surface `needs-human` first, then `idle`
+  (`t3ctl threads show <id> -t 1`), then `running`; update status fields.
+- Close: mark the task done, `t3ctl threads archive <id>`. Archive only threads the tracker references.
+- Reverse lookup when an id was lost: `t3ctl threads search "<task title>"`.
