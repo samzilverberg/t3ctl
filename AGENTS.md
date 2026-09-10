@@ -16,6 +16,9 @@ start a T3 server. README.md holds the user docs and protocol research; this fil
   `serverVersion`) or clone `pingdotgg/t3code` when you need a schema. Event payloads live under `event.payload`.
 - **Read-only scope by default.** Commands that mutate must call `connect(g, { write: true })` so the session
   upgrades to `orchestration:operate` automatically.
+- **Dispatch to the desktop backend**, never to the background service: two servers share the SQLite but not the
+  event bus, so the UI only sees live updates from its own process. `discoverServer` prefers `serverSelfUpdate:
+  desktop-managed`; do not persist or hardcode ports. `t3ctl servers` shows both.
 - Node ≥22, pnpm via corepack. If `pnpm` is not found, use
   `PATH=$HOME/.local/share/mise/installs/node/22.23.2/bin:$PATH`.
 

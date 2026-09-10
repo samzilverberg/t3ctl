@@ -79,7 +79,7 @@ export async function pair(server: Server, opts: { label?: string; operate: bool
   const account = accountKey(server);
   keychainSet(account, tok.access_token);
   const granted = tok.scope.split(" ");
-  writeConfig({ ...readConfig(), origin: server.origin, environmentId: server.descriptor.environmentId, keychainAccount: account, scopes: granted, expiresAt, label });
+  writeConfig({ ...readConfig(), environmentId: server.descriptor.environmentId, keychainAccount: account, scopes: granted, expiresAt, label });
   return { token: tok.access_token, scopes: granted, expiresAt };
 }
 

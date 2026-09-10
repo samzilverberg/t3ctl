@@ -8,7 +8,7 @@ export const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 export const T3_HOME = process.env.T3CODE_HOME ?? join(homedir(), ".t3");
 
 export interface Config {
-  /** Explicit server origin, e.g. http://127.0.0.1:3773. Optional; discovery runs otherwise. */
+  /** Extra origin to probe (e.g. a remote server). Discovery still prefers the local desktop backend. */
   origin?: string;
   /** Environment id of the server we paired with (from /.well-known/t3/environment). */
   environmentId?: string;

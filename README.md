@@ -8,6 +8,7 @@ Status: v0.0.3 — reads, thread management, approvals, projects. Verified again
 
 ```
 t3ctl env                                  # which server we target (no auth)
+t3ctl servers                              # every running T3 server on 127.0.0.1:3773-3780
 t3ctl auth pair [--operate] | status | forget
 t3ctl models [-a]                          # models per provider + allowed effort / context-window values
 t3ctl projects [list|show <ref>]
@@ -132,18 +133,21 @@ Source: github.com/pingdotgg/t3code tag `v0.0.38`. Full notes in `docs/research/
 So: **WS is not "the" way; HTTP is, with WS for streams.** Both are served by the same process and
 share auth.
 
-### Two servers on this machine
+### Two servers on this machine, and which one t3ctl must use
 
-- `:3773` — desktop-embedded backend (Electron spawns `t3 --mode desktop --bootstrap-fd 3`). Bound to
-  `0.0.0.0` because `desktop-settings.json` has `serverExposureMode: network-accessible`.
-- `:58881` — background service `t3 serve` (launchd), port chosen by `findAvailablePort(3773)`.
-  Owns the `cloudflared` T3 Connect tunnel for mobile/web relay.
+- **Desktop backend**: spawned by the Electron app on every launch (`t3 --mode desktop --bootstrap-fd 3`), dies with
+  the app. Advertises `serverSelfUpdate: desktop-managed`. The UI's WebSocket is connected to this one.
+- **Background service**: `t3 service install` registers a launchd agent that runs `t3 serve` at login. It hosts the
+  cloudflared T3 Connect tunnel for mobile/web. Advertises `serverSelfUpdate: boot-service`.
 
-Both use the same `~/.t3/userdata` (SQLite, signing key), so lists are identical and one token works
-on both. Agent turns run inside whichever process received the dispatch. **t3ctl targets `:3773`**
-so CLI-started work streams live in the desktop window. `server-runtime.json` (used by third-party
-CLIs for discovery) does not exist on this install; discovery falls back to probing 3773 +
-`GET /.well-known/t3/environment`.
+Both bind the first free port from 3773 upward, so which one owns 3773 depends on start order after a reboot.
+They share `~/.t3/userdata` (SQLite, signing key, sessions) but **not** an in-memory event bus: a command dispatched
+to one process is on disk instantly, yet the other process's live subscribers never hear about it. The desktop UI is
+a pure live-stream client, so dispatching to the service leaves the UI stale until it re-snapshots.
+
+**Discovery therefore probes 3773-3780 (plus `config.origin` and `server-runtime.json`) in parallel and prefers the
+`desktop-managed` server.** The service is only a fallback (with a stderr warning). `--origin` / `T3CTL_ORIGIN` bypass
+discovery. `t3ctl servers` shows what is running. Tokens work on either process since they share the DB.
 
 ### Auth
 
