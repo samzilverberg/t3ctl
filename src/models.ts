@@ -1,4 +1,5 @@
 import type { Server } from "./discover.js";
+import { modelAliases } from "./config.js";
 import { RpcSocket } from "./ws.js";
 
 export interface ModelOptionDescriptor { id: string; label: string; type: string; options?: Array<{ id: string; label: string; isDefault?: boolean }> }
@@ -25,17 +26,36 @@ export async function fetchServerSettings(server: Server, token: string): Promis
 
 export interface ResolvedModel { instance: ProviderInstance; model: ProviderModel }
 
-/** Resolve "<model>" or "<instanceId>/<model>" by slug or alias across enabled providers. */
+/** "Fable 5.0" → "fable-5-0"; "claude-opus-4.8" → "claude-opus-4-8". */
+export function normalizeModelRef(ref: string): string {
+  return ref.trim().toLowerCase().replace(/[\s._]+/g, "-").replace(/-+/g, "-");
+}
+
+/**
+ * Resolve a model reference across enabled providers. Order:
+ * 1. user/builtin alias (config `modelAliases`, e.g. opus → claude-opus-4-8)
+ * 2. exact slug or server alias
+ * 3. normalized forms: "fable 5.0" → fable-5-0 → claude-fable-5-0 → claude-fable-5 (trailing -0 dropped)
+ * Optional "<instanceId>/<model>" prefix pins the provider instance.
+ */
 export function resolveModel(providers: ProviderInstance[], ref: string): ResolvedModel {
   const [instPart, modelPart] = ref.includes("/") ? ref.split("/", 2) : [undefined, ref];
   const candidates = providers.filter((p) => p.enabled && (!instPart || p.instanceId === instPart));
-  const want = modelPart.toLowerCase();
-  for (const p of candidates) {
-    const m = p.models.find((x) => x.slug.toLowerCase() === want || (x.aliases ?? []).some((a) => a.toLowerCase() === want));
-    if (m) return { instance: p, model: m };
+  const aliases = modelAliases();
+  const norm = normalizeModelRef(modelPart);
+  const wanted = new Set<string>();
+  const aliased = aliases[norm] ?? aliases[modelPart.toLowerCase()];
+  if (aliased) wanted.add(normalizeModelRef(aliased));
+  wanted.add(norm);
+  if (!norm.startsWith("claude-")) wanted.add(`claude-${norm}`);
+  for (const w of [...wanted]) { if (w.endsWith("-0")) wanted.add(w.slice(0, -2)); }
+  const find = (pred: (m: ProviderModel) => boolean) => { for (const p of candidates) { const m = p.models.find(pred); if (m) return { instance: p, model: m }; } return undefined; };
+  for (const w of wanted) {
+    const hit = find((m) => normalizeModelRef(m.slug) === w || (m.aliases ?? []).some((a) => normalizeModelRef(a) === w));
+    if (hit) return hit;
   }
   const all = candidates.flatMap((p) => p.models.map((m) => `${p.instanceId}/${m.slug}`));
-  throw new Error(`unknown model "${ref}". Known: ${all.join(", ")}`);
+  throw new Error(`unknown model "${ref}". Aliases: ${Object.entries(aliases).map(([k, v]) => `${k}→${v}`).join(", ")}. Known: ${all.join(", ")}`);
 }
 
 /** Build a ModelSelection, validating option values (e.g. effort) against the model's descriptors. */

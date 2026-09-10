@@ -59,6 +59,22 @@ build is live immediately). Dev loop without building: `pnpm dev <args>`.
 
 Built-in runtime mode default is `auto` (T3 Code's own default is `full-access`).
 
+### Model references
+
+`-m` accepts, in this order: a t3ctl alias, an exact slug or server alias, or a fuzzy form where spaces/dots
+become dashes and `claude-` is implied (`"Fable 5.0"` → `claude-fable-5`, `"opus 4.7"` → `claude-opus-4-7`).
+Prefix with `instanceId/` to pin a provider. Built-in aliases deliberately differ from the server's own
+(`opus`/`sonnet` on the server mean the 5.x line):
+
+| alias | resolves to |
+|---|---|
+| `opus` | `claude-opus-4-8` |
+| `fable` | `claude-fable-5-1` |
+| `sonnet` | `claude-sonnet-4-6` |
+
+Override or extend via `"modelAliases": { "opus": "claude-opus-5", "cheap": "haiku" }` in config.json.
+`t3ctl models -a` marks t3ctl aliases with `*` in the aliases column (legacy models are hidden without `-a`).
+
 ### Token lifetime and re-pairing
 
 - The Keychain holds a **30-day** bearer session (server TTL, not configurable client-side). Its scopes and

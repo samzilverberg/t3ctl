@@ -22,6 +22,19 @@ export interface Config {
   expiresAt?: string;
   /** Defaults applied by `threads new` when flags are omitted. */
   defaults?: { runtimeMode?: string; interactionMode?: string; model?: string; effort?: string; env?: string };
+  /** User model aliases (alias → slug or server alias). Merged over BUILTIN_MODEL_ALIASES. */
+  modelAliases?: Record<string, string>;
+}
+
+/** Our own short names. The server's own `opus`/`sonnet` aliases point at the 5.x line; Sam wants these. */
+export const BUILTIN_MODEL_ALIASES: Record<string, string> = {
+  opus: "claude-opus-4-8",
+  fable: "claude-fable-5-1",
+  sonnet: "claude-sonnet-4-6",
+};
+
+export function modelAliases(): Record<string, string> {
+  return { ...BUILTIN_MODEL_ALIASES, ...(readConfig().modelAliases ?? {}) };
 }
 
 export function readConfig(): Config {

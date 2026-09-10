@@ -49,9 +49,12 @@ Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high
 ## Choosing project, model, effort
 
 - Project: match the task's repo (`t3ctl projects` → `workspaceRoot`). Never guess; ask if no project matches.
+- Model refs: t3ctl aliases `opus` = Opus 4.8, `fable` = Fable 5.1, `sonnet` = Sonnet 4.6 (these differ from the
+  server's own aliases). Specific versions work fuzzily: `"opus 5"`, `"fable 5.0"`, `"sonnet 5"`, `haiku`.
+  `t3ctl models -a` lists everything.
 - Model/effort policy unless the task note says otherwise (`t3-model:` / `t3-effort:` frontmatter):
   chores, formatting, docs → `sonnet -e low`; code changes with tests → `opus -e high`;
-  research, design, ambiguous scope → `fable -e xhigh`. Validate with `t3ctl models` if unsure.
+  research, design, ambiguous scope → `fable -e xhigh`.
 - Worktree is the default env for git projects; pass `--env local` only when the task must touch the main checkout.
 
 ## Rules
