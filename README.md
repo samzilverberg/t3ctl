@@ -4,14 +4,17 @@ Local CLI for controlling an **already-running** T3 Code app. Never starts a ser
 TypeScript, Node ≥22, pnpm, two runtime deps (`commander`, `ws`). Token in macOS Keychain,
 config in `~/.config/t3ctl/config.json`.
 
-Status: v0.0.2 — reads + thread management. Verified against T3 Code 0.0.38 on 2026-09-06.
+Status: v0.0.3 — reads, thread management, approvals, projects. Verified against T3 Code 0.0.38 on 2026-09-06.
 
 ```
 t3ctl env                                  # which server we target (no auth)
 t3ctl auth pair [--operate] | status | forget
 t3ctl models [-a]                          # models per provider + allowed effort / context-window values
 t3ctl projects [list|show <ref>]
+t3ctl projects add <path> [-t title] [-m model] [-e effort] [--create-dir]
+t3ctl projects remove <ref> [--force]
 t3ctl threads [list] [-p project] [-s status] [-a] [-n N]
+t3ctl threads -i <id,id,…>                                   # status report for known ids (Obsidian sync)
 t3ctl threads show <ref> [-t turns]
 t3ctl threads search <query>
 t3ctl threads watch <ref> [--timeout s]                      # raw NDJSON event stream
@@ -21,8 +24,14 @@ t3ctl threads new  -p <project> [-m model] [-e effort] [--context-window 1m] [--
                    [--runtime-mode …] [--interaction-mode default|plan] [--no-setup-script]
                    [--wait] [--stdin] "<prompt>"
 t3ctl threads send <ref> [-m model] [-e effort] [--wait] "<prompt>"
+t3ctl threads pending <ref>                                  # open approval / user-input requests
+t3ctl threads approve <ref> [-d accept|acceptForSession|acceptAlways|decline] [-r requestId]
+t3ctl threads respond <ref> -a <questionId>=<answer> … | --json '{…}'
 t3ctl threads interrupt|archive|unarchive <ref>
 ```
+
+Verified live: everything above except `threads respond` (user-input questions), whose payload mirrors the
+web client's `derivePendingUserInputs` but has not yet been exercised against a real prompt.
 
 Global: `--origin <url>`, `-f json|table`, `--no-auto-pair`. Output is JSON when stdout is not a TTY or
 `T3CTL_AGENT=1`. `T3CTL_TOKEN` overrides the Keychain. `<ref>` = id, id prefix, or exact title (projects
@@ -151,18 +160,24 @@ derived idle heuristic, SKILL.md. Avoided: `effect` dependency, direct DB writes
 - `t3 auth pairing create` uses Node's experimental SQLite; it prints a warning on stderr (suppressed).
 - Keychain access via `security` may prompt once per new terminal binary.
 
+### Pending approvals
+
+Not a first-class field. Like the web client (`apps/web/src/session-logic.ts`), t3ctl derives them from
+`thread.activities`: an `approval.requested` / `user-input.requested` activity whose `payload.requestId` has no
+later `*.resolved` activity is open. `threads wait` reports `needs-human` from the shell flags
+`hasPendingApprovals` / `hasPendingUserInput` (polled), then `threads pending` lists the request ids.
+
 ## Roadmap
 
-1. `threads approve <ref> --decision accept|decline` and `threads respond` (needs the pending-approval
-   request id; find where the projection exposes it).
-2. `projects add <path>` (`project.create`).
-3. Obsidian bridge (see below).
-4. Remote origins: `--origin https://…` already works for any reachable T3 server; add per-environment
-   Keychain entries for more than one.
+1. Exercise `threads respond` against a real user-input prompt.
+2. Multi-environment Keychain entries (`--origin https://…` already works for one remote server at a time).
+3. `threads diff <ref>` via `orchestration.getFullThreadDiff`.
 
-## Obsidian integration (design notes)
+## Obsidian integration
 
-Goal: a management session reads task notes, delegates to T3 Code threads, and later writes progress back.
+Implemented as conventions, not code: `_planner/conventions.md` in the vault has a "T3 Code delegation" section
+and `skills/t3ctl/SKILL.md` (symlinked to `~/.claude/skills/t3ctl`, so every Claude session sees it) tells agents
+how to use it. Summary:
 
 - **Task ↔ thread pairing**: store the thread id on the task note as frontmatter, e.g.
   `t3-thread: <uuid>`, `t3-project: mono`, `t3-status: running|idle|needs-human|done`, `t3-updated: <iso>`.

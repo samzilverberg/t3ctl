@@ -38,7 +38,11 @@ Only if it prints "t3 auth pairing create failed" should you tell the user to ch
 | …and block until first turn ends | add `--wait --timeout 1800` → `{…, wait:{status,reason,lastAssistantText}}` |
 | Follow-up | `t3ctl threads send <ref> "<prompt>" [--wait]` |
 | Block on a running thread | `t3ctl threads wait <ref> --timeout 1800` (exit 0 idle · 2 needs-human · 3 error · 4 timeout) |
+| What is it blocked on | `t3ctl threads pending <ref>` → `{approvals:[{requestId,requestKind,detail,options}], userInputs:[{requestId,questions:[{id,question,options:[{label}]}]}]}` |
+| Approve / decline | `t3ctl threads approve <ref> -d accept` (or `decline`, `acceptForSession`, `acceptAlways`; `-r <requestId>` to pick one) |
+| Answer questions | `t3ctl threads respond <ref> -a <questionId>=<option label> …` |
 | Stop / tidy | `t3ctl threads interrupt <ref>`, `t3ctl threads archive <ref>` |
+| Register a repo | `t3ctl projects add <path> [-m model -e effort]` |
 
 Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high --stdin`.
 
@@ -52,15 +56,18 @@ Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high
 
 ## Rules
 
-- `needs-approval` / `needs-input` means a human must act in the T3 Code UI. Report it; do not wait or retry.
+- `needs-approval` / `needs-input`: run `threads pending` and show the user exactly what is being asked. Only
+  approve yourself when the user has pre-authorised that class of action for the task; otherwise report and stop.
 - Never `interrupt`/`archive` a thread you did not create unless the user names it explicitly.
 - Do not send a message to a `running` thread; `wait` first.
 - Each `threads new` starts a paid agent turn. One thread per task; use `send` for follow-ups.
 
-## Obsidian handoff pattern
+## Obsidian handoff (vault `notes-obsidian`, folder `_planner/`; full contract in `_planner/conventions.md`)
 
-1. Read the task note; pick project/model/effort per the policy above.
-2. `t3ctl threads new … "<prompt that includes the note path and the deliverable>"` and write the returned
-   `threadId` into the note's frontmatter as `t3-thread`, plus `t3-status: running`.
-3. Later: `t3ctl threads show <id> -t 1` → summarize the last assistant message into the note;
-   set `t3-status` from the `status` field.
+- Task-note frontmatter: `t3-thread`, `t3-status` (running|idle|needs-human|error|done), `t3-updated`,
+  optional `t3-model`, `t3-effort`. Checkbox tasks: inline `[t3:: <uuid>]`, status `[/]` while delegated.
+- Delegate: read the note → `t3ctl threads new -p <project> -m <model> -e <effort> -t "<task title>" "<prompt with
+  note path + deliverable>"` → write `t3-thread` + `t3-status: running` immediately (`obsidian property:set`).
+- Sync (daily loop): gather all ids → `t3ctl threads -i id1,id2,…` → surface `needs-human` first, then `idle`
+  (review `t3ctl threads show <id> -t 1`), then `running`; update `t3-status`/`t3-updated`.
+- Close: `t3-status: done`, complete the task, `t3ctl threads archive <id>`. Archive only planner-referenced threads.

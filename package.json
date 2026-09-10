@@ -1,6 +1,6 @@
 {
   "name": "t3ctl",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "description": "Local CLI for controlling an already-running T3 Code app",
   "type": "module",

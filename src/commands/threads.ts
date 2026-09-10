@@ -8,6 +8,9 @@ import { RpcSocket } from "../ws.js";
 import { buildModelSelection, fetchProviders, fetchServerSettings, resolveModel, type ModelSelection } from "../models.js";
 import { nowIso, tempBranchName, uuid } from "../ids.js";
 import { threadStatus, waitForIdle } from "../wait.js";
+import { derivePendingApprovals, derivePendingUserInputs, type Activity } from "../pending.js";
+
+const APPROVAL_DECISIONS = ["accept", "acceptForSession", "acceptAlways", "decline"] as const;
 
 async function loadThreads(ctx: { server: import("../discover.js").Server; client: import("../http.js").Client }, includeArchived: boolean): Promise<{ threads: ShellThread[]; projects: ShellProject[] }> {
   const shell = await api.shell(ctx.client);
@@ -60,10 +63,12 @@ export function registerThreads(program: Command) {
     .option("-s, --status <status>", "filter by derived status (running|idle|needs-approval|needs-input|error|archived)")
     .option("-a, --all", "include archived threads", false)
     .option("-n, --limit <n>", "max rows", (v) => Number(v), 50)
-    .action(async (o: { project?: string; status?: string; all: boolean; limit: number }) => {
+    .option("-i, --ids <ids>", "comma-separated thread ids/prefixes to report on (implies -a; unknown ids reported with status missing)")
+    .action(async (o: { project?: string; status?: string; all: boolean; limit: number; ids?: string }) => {
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g);
       const shell = await withAuthRetry(ctx, g, api.shell);
+      if (o.ids) o.all = true;
       if (o.all) {
         // Archived threads are served by a separate RPC, not the live shell snapshot.
         const sock = new RpcSocket(ctx.server, ctx.client.token);
@@ -77,6 +82,12 @@ export function registerThreads(program: Command) {
       }
       const byProject = new Map(shell.projects.map((p) => [p.id, p]));
       let list = shell.threads.map((t) => ({ ...t, status: threadStatus(t), projectTitle: byProject.get(t.projectId)?.title ?? "" }));
+      if (o.ids) {
+        const wanted = o.ids.split(",").map((x) => x.trim()).filter(Boolean);
+        list = wanted.map((ref) => list.find((t) => t.id === ref || t.id.startsWith(ref)) ?? ({ id: ref, projectId: "", title: "", status: "missing", projectTitle: "" } as (typeof list)[number]));
+        emit(ctx.format, list, () => renderTable(list.map((t) => ({ id: short(t.id), status: t.status, title: t.title.slice(0, 60), updated: ago(t.updatedAt ?? t.createdAt) })), ["id", "status", "title", "updated"]));
+        return;
+      }
       if (!o.all) list = list.filter((t) => !t.archivedAt);
       if (o.project) { const p = matchProject(shell.projects, o.project); list = list.filter((t) => t.projectId === p.id); }
       if (o.status) list = list.filter((t) => t.status === o.status);
@@ -276,6 +287,74 @@ export function registerThreads(program: Command) {
       const out = await waitForIdle(ctx.server, ctx.client.token, t.id, { timeoutMs: o.timeout * 1000, requireTurnStart: true, poll: shellPoller(ctx.client, t.id) });
       emit(ctx.format, { threadId: t.id, sequence: res.sequence, wait: out }, () => `${out.status} (${out.reason})\n\n${out.lastAssistantText ?? ""}`);
       process.exitCode = exitCodeFor(out.reason);
+    });
+
+  threads
+    .command("pending <ref>")
+    .description("Show open approval / user-input requests the thread is blocked on")
+    .action(async (ref: string) => {
+      const ctx = await connect(program.opts<GlobalOpts>());
+      const shell = await api.shell(ctx.client);
+      const t = matchThread(shell.threads, ref);
+      const detail = await api.thread(ctx.client, t.id, 3);
+      const acts = ((detail.thread as { activities?: Activity[] }).activities ?? []);
+      const out = { threadId: t.id, status: threadStatus(t), approvals: derivePendingApprovals(acts), userInputs: derivePendingUserInputs(acts) };
+      emit(ctx.format, out, () => {
+        const lines = [`status ${out.status}`];
+        for (const a of out.approvals) lines.push(`approval ${a.requestId}  ${a.requestKind ?? a.requestType ?? ""}  ${a.detail ?? ""}  options: ${(a.options ?? []).map((o) => o.decision).join("|") || APPROVAL_DECISIONS.join("|")}`);
+        for (const u of out.userInputs) for (const q of u.questions) lines.push(`user-input ${u.requestId}  [${q.id}] ${q.question}  options: ${q.options.map((o) => o.label).join(" | ")}${q.multiSelect ? " (multi)" : ""}`);
+        if (lines.length === 1) lines.push("(nothing pending)");
+        return lines.join("\n");
+      });
+    });
+
+  threads
+    .command("approve <ref>")
+    .description("Respond to a pending approval request (default: the oldest one)")
+    .option("-d, --decision <d>", APPROVAL_DECISIONS.join("|"), "accept")
+    .option("-r, --request <id>", "specific requestId (see `threads pending`)")
+    .action(async (ref: string, o: { decision: string; request?: string }) => {
+      const g = program.opts<GlobalOpts>();
+      if (!(APPROVAL_DECISIONS as readonly string[]).includes(o.decision)) throw new Error(`invalid decision. Allowed: ${APPROVAL_DECISIONS.join(", ")}`);
+      const ctx = await connect(g, { write: true });
+      const shell = await withAuthRetry(ctx, g, api.shell);
+      const t = matchThread(shell.threads, ref);
+      const detail = await api.thread(ctx.client, t.id, 3);
+      const pending = derivePendingApprovals(((detail.thread as { activities?: Activity[] }).activities ?? []));
+      const target = o.request ? pending.find((p) => p.requestId === o.request) : pending[0];
+      if (!target) throw new Error(o.request ? `no pending approval ${o.request}` : `thread ${short(t.id)} has no pending approvals`);
+      const res = await dispatch(ctx.client, { type: "thread.approval.respond", commandId: uuid(), threadId: t.id, requestId: target.requestId, decision: o.decision, createdAt: nowIso() });
+      emit(ctx.format, { threadId: t.id, requestId: target.requestId, decision: o.decision, sequence: res.sequence }, () => `${o.decision} → ${target.requestId} (${target.requestKind ?? ""} ${target.detail ?? ""})`);
+    });
+
+  threads
+    .command("respond <ref>")
+    .description("Answer a pending user-input request. Use -a <questionId>=<option label> per question, or --json '{...}'.")
+    .option("-r, --request <id>", "specific requestId (default: oldest pending)")
+    .option("-a, --answer <kv...>", "questionId=answer (repeatable; comma-separate for multi-select)")
+    .option("--json <answers>", "raw answers object keyed by question id")
+    .action(async (ref: string, o: { request?: string; answer?: string[]; json?: string }) => {
+      const g = program.opts<GlobalOpts>();
+      const ctx = await connect(g, { write: true });
+      const shell = await withAuthRetry(ctx, g, api.shell);
+      const t = matchThread(shell.threads, ref);
+      const detail = await api.thread(ctx.client, t.id, 3);
+      const pending = derivePendingUserInputs(((detail.thread as { activities?: Activity[] }).activities ?? []));
+      const target = o.request ? pending.find((p) => p.requestId === o.request) : pending[0];
+      if (!target) throw new Error(o.request ? `no pending user-input ${o.request}` : `thread ${short(t.id)} has no pending user-input requests`);
+      let answers: Record<string, unknown> = {};
+      if (o.json) answers = JSON.parse(o.json) as Record<string, unknown>;
+      for (const kv of o.answer ?? []) {
+        const i = kv.indexOf("="); if (i < 0) throw new Error(`bad --answer "${kv}", expected questionId=answer`);
+        const qid = kv.slice(0, i); const val = kv.slice(i + 1);
+        const q = target.questions.find((x) => x.id === qid);
+        if (!q) throw new Error(`unknown question "${qid}". Questions: ${target.questions.map((x) => x.id).join(", ")}`);
+        answers[qid] = q.multiSelect ? val.split(",").map((x) => x.trim()) : val;
+      }
+      const missing = target.questions.filter((q) => !(q.id in answers));
+      if (missing.length) throw new Error(`unanswered questions: ${missing.map((q) => `${q.id} (${q.options.map((x) => x.label).join(" | ")})`).join("; ")}`);
+      const res = await dispatch(ctx.client, { type: "thread.user-input.respond", commandId: uuid(), threadId: t.id, requestId: target.requestId, answers, createdAt: nowIso() });
+      emit(ctx.format, { threadId: t.id, requestId: target.requestId, answers, sequence: res.sequence }, () => `answered ${target.requestId}`);
     });
 
   threads
