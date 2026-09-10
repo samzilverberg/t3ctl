@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { readFileSync } from "node:fs";
+
+const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
 import { registerEnv } from "./commands/env.js";
 import { registerAuth } from "./commands/auth.js";
 import { registerProjects } from "./commands/projects.js";
@@ -9,7 +12,7 @@ import { registerModels } from "./commands/models.js";
 const program = new Command()
   .name("t3ctl")
   .description("Control an already-running T3 Code app from the terminal ")
-  .version("0.0.1")
+  .version(pkg.version)
   .option("--origin <url>", "server origin (default: discover; env T3CTL_ORIGIN)")
   .option("-f, --format <fmt>", "json|table (default: table on TTY, json otherwise / T3CTL_AGENT=1)")
   .option("--no-auto-pair", "fail instead of re-pairing automatically when the stored token is missing/expired/insufficient")
