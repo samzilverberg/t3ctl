@@ -19,7 +19,8 @@ export function registerAuth(program: Command) {
       const g = program.opts<GlobalOpts>();
       const server = await discoverServer(g.origin);
       const res = await pair(server, o);
-      emit(pickFormat(g.format), { origin: server.origin, environmentId: server.descriptor.environmentId, ...res, config: CONFIG_PATH }, () =>
+      const { token: _t, ...safe } = res; void _t;
+      emit(pickFormat(g.format), { origin: server.origin, environmentId: server.descriptor.environmentId, ...safe, config: CONFIG_PATH }, () =>
         `Paired with ${server.descriptor.label} (${server.origin})\nscopes   ${res.scopes.join(" ")}\nexpires  ${res.expiresAt}\ntoken    macOS Keychain (service t3ctl)\nconfig   ${CONFIG_PATH}`);
     });
 
@@ -28,7 +29,7 @@ export function registerAuth(program: Command) {
     .description("Show the server's view of our session (GET /api/auth/session)")
     .action(async () => {
       const g = program.opts<GlobalOpts>();
-      const { client, format, server } = await connect(g);
+      const { client, format, server } = await connect({ ...g, noAutoPair: true });
       const s = await api.session(client);
       const cfg = readConfig();
       emit(format, { origin: server.origin, ...s, storedExpiresAt: cfg.expiresAt }, () =>

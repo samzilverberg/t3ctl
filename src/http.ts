@@ -52,7 +52,7 @@ export interface AuthSessionState {
   expiresAt?: string;
   [k: string]: unknown;
 }
-export interface ShellProject { id: string; title: string; workspaceRoot: string; [k: string]: unknown }
+export interface ShellProject { id: string; title: string; workspaceRoot: string; defaultModelSelection?: unknown; [k: string]: unknown }
 export interface ShellThread {
   id: string;
   projectId: string;
@@ -62,12 +62,31 @@ export interface ShellThread {
   archivedAt?: string | null;
   branch?: string | null;
   worktreePath?: string | null;
-  modelSelection?: { instanceId?: string; model?: string };
+  modelSelection?: { instanceId?: string; model?: string; options?: Array<{ id: string; value: unknown }> };
   latestTurn?: { turnId?: string; state?: string } | null;
   session?: { status?: string; activeTurnId?: string | null } | null;
   hasPendingApprovals?: boolean;
   hasPendingUserInput?: boolean;
+  runtimeMode?: string;
+  interactionMode?: string;
   [k: string]: unknown;
 }
 export interface ShellSnapshot { snapshotSequence: number; projects: ShellProject[]; threads: ShellThread[]; [k: string]: unknown }
 export interface ThreadDetail { snapshotSequence: number; thread: ShellThread & { messages?: unknown[]; [k: string]: unknown }; page?: unknown; [k: string]: unknown }
+
+// ---- Write path (requires orchestration:operate) ----
+export interface DispatchResult { sequence: number; [k: string]: unknown }
+
+/**
+ * Dispatch a ClientOrchestrationCommand. We use the WebSocket RPC `orchestration.dispatchCommand`
+ * rather than `POST /api/orchestration/dispatch`: only the WS handler implements the
+ * `thread.turn.start` bootstrap (create thread + prepare worktree + run setup script). The HTTP
+ * route passes bootstrap straight to the engine and fails with orchestration_dispatch_failed.
+ */
+export async function dispatch(c: Client, command: Record<string, unknown>): Promise<DispatchResult> {
+  const { RpcSocket } = await import("./ws.js");
+  const sock = new RpcSocket(c.server, c.token);
+  try {
+    return await sock.request<DispatchResult>("orchestration.dispatchCommand", command);
+  } finally { sock.close(); }
+}

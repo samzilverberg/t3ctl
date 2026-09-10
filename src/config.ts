@@ -16,6 +16,8 @@ export interface Config {
   keychainAccount?: string;
   /** Scopes granted to our stored session. */
   scopes?: string[];
+  /** Connection label used when pairing. */
+  label?: string;
   /** ISO expiry of the stored session. */
   expiresAt?: string;
 }

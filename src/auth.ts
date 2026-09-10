@@ -1,13 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { hostname } from "node:os";
 import { T3_HOME, readConfig, writeConfig } from "./config.js";
 import { keychainDelete, keychainGet, keychainSet } from "./keychain.js";
 import type { Server } from "./discover.js";
 
-/** Scopes this CLI requests. Read-only by default; `operate` only when explicitly asked. */
+/** Scopes this CLI requests. Read-only by default; `operate` only when a write command needs it. */
 export const READ_SCOPES = ["orchestration:read"];
 export const OPERATE_SCOPES = ["orchestration:read", "orchestration:operate"];
+export const DEFAULT_LABEL = `t3ctl@${hostname()}`;
 
 export function accountKey(server: Server): string {
   return server.descriptor.environmentId;
@@ -31,13 +33,7 @@ export function findT3Bin(serverVersion: string): string[] {
   return ["npx", "-y", `t3@${serverVersion}`];
 }
 
-interface PairingCredential {
-  id: string;
-  credential: string;
-  label?: string;
-  scopes: string[];
-  expiresAt: string;
-}
+interface PairingCredential { id: string; credential: string; label?: string; scopes: string[]; expiresAt: string }
 
 export function mintPairingCredential(server: Server, label: string): PairingCredential {
   const [cmd, ...pre] = findT3Bin(server.descriptor.serverVersion);
@@ -49,12 +45,7 @@ export function mintPairingCredential(server: Server, label: string): PairingCre
   return JSON.parse(r.stdout.slice(jsonStart)) as PairingCredential;
 }
 
-interface TokenResponse {
-  access_token: string;
-  token_type: string;
-  expires_in: number;
-  scope: string;
-}
+interface TokenResponse { access_token: string; token_type: string; expires_in: number; scope: string }
 
 /** RFC 8693 token exchange: one-time pairing credential → 30-day bearer session. */
 export async function exchangePairingCredential(server: Server, credential: string, scopes: string[], label: string): Promise<TokenResponse> {
@@ -68,37 +59,51 @@ export async function exchangePairingCredential(server: Server, credential: stri
     client_device_type: "desktop",
     client_os: process.platform,
   });
-  const r = await fetch(`${server.origin}/oauth/token`, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body,
-  });
+  const r = await fetch(`${server.origin}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
   if (!r.ok) throw new Error(`token exchange failed: ${r.status} ${await r.text()}`);
   return (await r.json()) as TokenResponse;
 }
 
-export async function pair(server: Server, opts: { label: string; operate: boolean }): Promise<{ scopes: string[]; expiresAt: string }> {
+export interface PairResult { token: string; scopes: string[]; expiresAt: string }
+
+/**
+ * Full pairing: mint → exchange → store. Non-interactive (the mint uses the local `t3` binary and the
+ * app's own DB; the Keychain write may prompt once per new t3ctl binary). Safe to call automatically.
+ */
+export async function pair(server: Server, opts: { label?: string; operate: boolean }): Promise<PairResult> {
+  const label = opts.label ?? DEFAULT_LABEL;
   const scopes = opts.operate ? OPERATE_SCOPES : READ_SCOPES;
-  const cred = mintPairingCredential(server, opts.label);
-  const tok = await exchangePairingCredential(server, cred.credential, scopes, opts.label);
+  const cred = mintPairingCredential(server, label);
+  const tok = await exchangePairingCredential(server, cred.credential, scopes, label);
   const expiresAt = new Date(Date.now() + tok.expires_in * 1000).toISOString();
   const account = accountKey(server);
   keychainSet(account, tok.access_token);
-  writeConfig({
-    ...readConfig(),
-    origin: server.origin,
-    environmentId: server.descriptor.environmentId,
-    keychainAccount: account,
-    scopes: tok.scope.split(" "),
-    expiresAt,
-  });
-  return { scopes: tok.scope.split(" "), expiresAt };
+  const granted = tok.scope.split(" ");
+  writeConfig({ ...readConfig(), origin: server.origin, environmentId: server.descriptor.environmentId, keychainAccount: account, scopes: granted, expiresAt, label });
+  return { token: tok.access_token, scopes: granted, expiresAt };
 }
 
-export function loadToken(server: Server): string {
-  const tok = keychainGet(accountKey(server));
-  if (!tok) throw new Error(`Not paired with ${server.descriptor.label} (${server.origin}). Run: t3ctl auth pair`);
-  return tok;
+/**
+ * Return a usable token that has `needScopes`. Re-pairs automatically when: no token stored, token
+ * expired (per stored expiry), or the stored scopes lack what the command needs. Callers should also
+ * retry once via `repairOn401` when the server rejects a token we believed valid (revoked in UI).
+ */
+export async function ensureToken(server: Server, needScopes: string[] = READ_SCOPES, opts: { autoPair?: boolean } = {}): Promise<string> {
+  const cfg = readConfig();
+  const stored = keychainGet(accountKey(server));
+  const have = new Set(cfg.scopes ?? []);
+  const missing = needScopes.filter((s) => !have.has(s));
+  const expired = cfg.expiresAt ? Date.parse(cfg.expiresAt) - Date.now() < 60_000 : false;
+  if (stored && !expired && missing.length === 0) return stored;
+  if (opts.autoPair === false) {
+    throw new Error(stored ? `Stored session lacks scopes [${missing.join(", ")}] or is expired. Run: t3ctl auth pair${missing.includes("orchestration:operate") ? " --operate" : ""}` : `Not paired with ${server.descriptor.label} (${server.origin}). Run: t3ctl auth pair`);
+  }
+  // Keep operate if we already had it, or if the caller needs it.
+  const operate = have.has("orchestration:operate") || needScopes.includes("orchestration:operate");
+  const why = !stored ? "no stored token" : expired ? "token expired" : `missing scopes ${missing.join(",")}`;
+  process.stderr.write(`t3ctl: re-pairing with ${server.descriptor.label} (${why})…\n`);
+  const res = await pair(server, { label: cfg.label, operate });
+  return res.token;
 }
 
 export function forget(server: Server): boolean {

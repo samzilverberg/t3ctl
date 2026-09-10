@@ -1,27 +1,66 @@
 # t3ctl
 
 Local CLI for controlling an **already-running** T3 Code app. Never starts a server.
-TypeScript, Node ≥22, two runtime deps (`commander`, `ws`). Token in macOS Keychain,
+TypeScript, Node ≥22, pnpm, two runtime deps (`commander`, `ws`). Token in macOS Keychain,
 config in `~/.config/t3ctl/config.json`.
 
-Status: **read-only prototype** (v0.0.1). Verified against T3 Code 0.0.38 on 2026-09-06.
+Status: v0.0.2 — reads + thread management. Verified against T3 Code 0.0.38 on 2026-09-06.
 
 ```
-t3ctl env                         # which server we target (no auth)
-t3ctl auth pair [--operate]       # mint pairing token via installed `t3`, exchange for 30d bearer, store in Keychain
-t3ctl auth status | forget
+t3ctl env                                  # which server we target (no auth)
+t3ctl auth pair [--operate] | status | forget
+t3ctl models [-a]                          # models per provider + allowed effort / context-window values
 t3ctl projects [list|show <ref>]
 t3ctl threads [list] [-p project] [-s status] [-a] [-n N]
 t3ctl threads show <ref> [-t turns]
-t3ctl threads search <query>      # WS unary RPC
-t3ctl threads watch <ref> [--until-idle] [--timeout s]   # WS stream, NDJSON
+t3ctl threads search <query>
+t3ctl threads watch <ref> [--timeout s]                      # raw NDJSON event stream
+t3ctl threads wait <ref> [--timeout s] [--require-turn]      # exit 0 idle · 2 needs-human · 3 error · 4 timeout
+t3ctl threads new  -p <project> [-m model] [-e effort] [--context-window 1m] [--fast]
+                   [-t title] [--env worktree|local] [--base br] [--branch br]
+                   [--runtime-mode …] [--interaction-mode default|plan] [--no-setup-script]
+                   [--wait] [--stdin] "<prompt>"
+t3ctl threads send <ref> [-m model] [-e effort] [--wait] "<prompt>"
+t3ctl threads interrupt|archive|unarchive <ref>
 ```
 
-Global: `--origin <url>`, `-f json|table`. Output is JSON automatically when stdout is not a TTY
-or `T3CTL_AGENT=1`. `T3CTL_TOKEN` overrides the Keychain. `<ref>` = id, id prefix, or exact title.
+Global: `--origin <url>`, `-f json|table`, `--no-auto-pair`. Output is JSON when stdout is not a TTY or
+`T3CTL_AGENT=1`. `T3CTL_TOKEN` overrides the Keychain. `<ref>` = id, id prefix, or exact title (projects
+also accept workspaceRoot). Model refs accept slug or alias (`sonnet`, `opus`, `fable`) or `instanceId/slug`.
 
-Dev: `npx tsx src/index.ts …` (or `npm run build` → `dist/index.js`). Node is pinned via
-`.node-version`; on this machine mise shims need `PATH=$HOME/.local/share/mise/installs/node/22.23.2/bin:$PATH`.
+### Install for humans and agents
+
+```sh
+pnpm install
+./scripts/install-bin.sh        # builds dist/ and writes ~/.local/bin/t3ctl (pinned node), idempotent
+```
+
+`~/.local/bin` is already on PATH for login shells here, so every agent that shells out (Claude Code, T3
+Code sessions, cron) gets `t3ctl` with no global npm install and no dependency on mise shims. Re-run the
+script after pulling. Dev loop without installing: `pnpm dev <args>`.
+
+### Token lifetime and re-pairing
+
+- The Keychain holds a **30-day** bearer session (server TTL, not configurable client-side). Its scopes and
+  expiry are mirrored in `config.json`.
+- Re-pairing is **automatic and non-interactive**: when the token is missing, within 60 s of expiry, lacks a
+  scope the command needs (e.g. first write → `orchestration:operate`), or the server answers 401 (revoked
+  in the UI), t3ctl mints a fresh pairing credential via the installed `t3 auth pairing create`, exchanges it,
+  and overwrites the Keychain item. A one-line notice goes to stderr. `--no-auto-pair` turns this into an error.
+- Read-only by default. The first `threads new/send/interrupt/archive` upgrades the session to
+  `orchestration:read orchestration:operate`; the upgraded session is kept afterwards.
+- Each pairing shows up as a connection in T3 Code → Settings → Connections; revoke stale ones there.
+
+### Thread creation defaults
+
+- **Model**: `--model` → project `defaultModelSelection` → server `textGenerationModelSelection`.
+  `--effort` / `--context-window` / `--fast` are validated against the model's option descriptors from
+  `server.getConfig` (`t3ctl models` prints them; `*` marks defaults).
+- **Env**: `--env` → server `defaultThreadEnvMode` (yours: `worktree`). Worktree mode needs the project root to
+  be a git checkout; base branch = `--base` or the checkout's current branch; worktree branch = `--branch` or
+  `t3code/<hex>` like the desktop; `newWorktreesStartFromOrigin` is honoured; setup script runs unless
+  `--no-setup-script`. Non-git roots fall back to `local`.
+- **Modes**: `--runtime-mode full-access` (default) and `--interaction-mode default|plan`.
 
 ---
 
@@ -71,9 +110,12 @@ CLIs for discovery) does not exist on this install; discovery falls back to prob
   dance is unnecessary.
 - Sessions appear in T3 Code → Connections and can be revoked there.
 
-### Write surface (for the next phase; needs `--operate`)
+### Write surface
 
-All writes are `POST /api/orchestration/dispatch` with a `ClientOrchestrationCommand`
+All writes are a `ClientOrchestrationCommand` sent through the WebSocket RPC
+`orchestration.dispatchCommand`. **Not** `POST /api/orchestration/dispatch`: only the WS handler implements
+the `thread.turn.start` bootstrap (create thread, prepare worktree, run setup script); the HTTP route hands
+bootstrap to the engine and fails with `orchestration_dispatch_failed`. Commands
 (client generates `commandId`, `threadId`, `messageId` UUIDs + `createdAt`):
 
 - `project.create`, `project.meta.update`, `project.delete`
@@ -82,10 +124,11 @@ All writes are `POST /api/orchestration/dispatch` with a `ClientOrchestrationCom
   `thread.user-input.respond`, `thread.archive/unarchive/delete/settle/snooze/pin/meta.update`,
   `thread.runtime-mode.set`, `thread.interaction-mode.set`, `thread.session.stop`.
 
-Response is `{sequence}`; confirm by `subscribeThread({afterSequence})` or polling
-`GET /api/orchestration/threads/:id`. "Idle" is derived, not an RPC: `session.activeTurnId == null`
-and `latestTurn.state ∈ {completed, interrupted, error}`; `hasPendingApprovals` /
-`hasPendingUserInput` mean the thread needs a human.
+Response is `{sequence}`. "Idle" is derived, not an RPC. `threads wait` subscribes to the thread stream and
+treats `thread.session-set` with `activeTurnId: null` (after having seen a turn) as the end of the turn; event
+payloads live under `event.payload`. `hasPendingApprovals` / `hasPendingUserInput` are shell-row flags, not
+thread-stream events, so `wait` polls the shell snapshot every 5 s on the side. Archived threads are not in
+the live shell snapshot; `orchestration.getArchivedShellSnapshot` returns them, and their detail endpoint 404s.
 
 ### Reference CLIs (studied, not used)
 
@@ -110,8 +153,25 @@ derived idle heuristic, SKILL.md. Avoided: `effect` dependency, direct DB writes
 
 ## Roadmap
 
-1. `threads new --project <ref> [--branch] [--worktree] <prompt>` and `threads send <ref> <prompt>` via `thread.turn.start` (requires `auth pair --operate`).
-2. `threads wait <ref>` (reuse `watch --until-idle` logic) and `threads approve/respond`.
-3. `threads archive`, `projects add`.
-4. Obsidian bridge: skill instructs the management-session agent to write `t3 thread id` + status back into the task note.
-5. Publish to personal GitHub (private).
+1. `threads approve <ref> --decision accept|decline` and `threads respond` (needs the pending-approval
+   request id; find where the projection exposes it).
+2. `projects add <path>` (`project.create`).
+3. Obsidian bridge (see below).
+4. Remote origins: `--origin https://…` already works for any reachable T3 server; add per-environment
+   Keychain entries for more than one.
+
+## Obsidian integration (design notes)
+
+Goal: a management session reads task notes, delegates to T3 Code threads, and later writes progress back.
+
+- **Task ↔ thread pairing**: store the thread id on the task note as frontmatter, e.g.
+  `t3-thread: <uuid>`, `t3-project: mono`, `t3-status: running|idle|needs-human|done`, `t3-updated: <iso>`.
+  `threads new` prints the id (JSON `threadId`); the agent writes it with the Obsidian CLI. Reverse lookup
+  is `t3ctl threads search "<note title>"` or by putting the note path in the first prompt line.
+- **Model / effort choice**: default from frontmatter (`t3-model: sonnet`, `t3-effort: low`) with a per-vault
+  policy in the skill: small chores → `sonnet@low`, code changes → `opus@high`, research/design → `fable@xhigh`.
+  Absent frontmatter → project default.
+- **Progress**: `t3ctl threads show <id> -t 1` for the latest assistant message; `t3ctl threads wait <id>`
+  (exit code) for blocking flows; `-s needs-approval` listing for a "needs me" view.
+- **Skill exposure**: symlink `skills/t3ctl` into `~/.claude/skills/t3ctl` so every Claude session (user scope)
+  discovers it; T3 Code sessions see it the same way via the home-directory Claude config.
