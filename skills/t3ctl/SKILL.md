@@ -5,7 +5,7 @@ description: Read, create and drive T3 Code sessions from the terminal via the t
 
 # t3ctl — control the running T3 Code app
 
-`t3ctl` (on PATH at `~/.local/bin/t3ctl`) talks to the T3 Code desktop app already running on this Mac.
+`t3ctl` (on PATH via `pnpm link --global`) talks to the T3 Code desktop app already running on this Mac.
 It never starts a server. Always run with `T3CTL_AGENT=1` and parse JSON; never scrape tables.
 
 ```sh

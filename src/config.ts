@@ -20,6 +20,8 @@ export interface Config {
   label?: string;
   /** ISO expiry of the stored session. */
   expiresAt?: string;
+  /** Defaults applied by `threads new` when flags are omitted. */
+  defaults?: { runtimeMode?: string; interactionMode?: string; model?: string; effort?: string; env?: string };
 }
 
 export function readConfig(): Config {

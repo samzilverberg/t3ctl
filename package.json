@@ -14,7 +14,7 @@
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "install:bin": "./scripts/install-bin.sh"
+    "prepare": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "commander": "^14.0.0",
@@ -26,5 +26,8 @@
     "tsx": "^4.20.0",
     "typescript": "^5.8.0"
   },
-  "packageManager": "pnpm@10.34.5"
+  "packageManager": "pnpm@10.34.5",
+  "files": [
+    "dist"
+  ]
 }

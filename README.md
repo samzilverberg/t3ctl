@@ -40,13 +40,24 @@ also accept workspaceRoot). Model refs accept slug or alias (`sonnet`, `opus`, `
 ### Install for humans and agents
 
 ```sh
-pnpm install
-./scripts/install-bin.sh        # builds dist/ and writes ~/.local/bin/t3ctl (pinned node), idempotent
+pnpm install            # also builds dist/ (prepare script)
+pnpm link --global      # exposes `t3ctl` from $PNPM_HOME (~/Library/pnpm), already on PATH in fish
 ```
 
-`~/.local/bin` is already on PATH for login shells here, so every agent that shells out (Claude Code, T3
-Code sessions, cron) gets `t3ctl` with no global npm install and no dependency on mise shims. Re-run the
-script after pulling. Dev loop without installing: `pnpm dev <args>`.
+Standard pnpm global link: the package's `bin` entry points at `dist/index.js` (shebang `#!/usr/bin/env node`,
+resolved through the mise `node` shim). Every agent that shells out (Claude Code, T3 Code sessions, cron) sees
+`t3ctl` with no wrapper scripts. After changing sources run `pnpm build` (the link follows the repo, so the new
+build is live immediately). Dev loop without building: `pnpm dev <args>`.
+
+### Config defaults
+
+`~/.config/t3ctl/config.json` may carry a `defaults` block used by `threads new` when flags are omitted:
+
+```json
+{ "defaults": { "runtimeMode": "auto", "interactionMode": "default", "model": "opus", "effort": "high", "env": "worktree" } }
+```
+
+Built-in runtime mode default is `auto` (T3 Code's own default is `full-access`).
 
 ### Token lifetime and re-pairing
 
@@ -69,7 +80,7 @@ script after pulling. Dev loop without installing: `pnpm dev <args>`.
   be a git checkout; base branch = `--base` or the checkout's current branch; worktree branch = `--branch` or
   `t3code/<hex>` like the desktop; `newWorktreesStartFromOrigin` is honoured; setup script runs unless
   `--no-setup-script`. Non-git roots fall back to `local`.
-- **Modes**: `--runtime-mode full-access` (default) and `--interaction-mode default|plan`.
+- **Modes**: `--runtime-mode` (default `auto`, or `defaults.runtimeMode`) and `--interaction-mode default|plan`.
 
 ---
 

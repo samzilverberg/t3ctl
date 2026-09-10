@@ -7,6 +7,7 @@ import { ago, emit, renderTable, short } from "../output.js";
 import { RpcSocket } from "../ws.js";
 import { buildModelSelection, fetchProviders, fetchServerSettings, resolveModel, type ModelSelection } from "../models.js";
 import { nowIso, tempBranchName, uuid } from "../ids.js";
+import { readConfig } from "../config.js";
 import { threadStatus, waitForIdle } from "../wait.js";
 import { derivePendingApprovals, derivePendingUserInputs, type Activity } from "../pending.js";
 
@@ -176,17 +177,22 @@ export function registerThreads(program: Command) {
     .option("--env <mode>", "worktree|local (default: server setting defaultThreadEnvMode)")
     .option("--base <branch>", "base branch for the worktree (default: current branch of workspaceRoot)")
     .option("--branch <name>", "worktree branch name (default: t3code/<hex>)")
-    .option("--runtime-mode <mode>", RUNTIME_MODES.join("|"), "full-access")
-    .option("--interaction-mode <mode>", INTERACTION_MODES.join("|"), "default")
+    .option("--runtime-mode <mode>", `${RUNTIME_MODES.join("|")} (default: config defaults.runtimeMode, else auto)`)
+    .option("--interaction-mode <mode>", `${INTERACTION_MODES.join("|")} (default: config defaults.interactionMode, else default)`)
     .option("--no-setup-script", "skip the project setup script in the new worktree")
     .option("--stdin", "read prompt from stdin", false)
     .option("--wait", "wait for the first turn to finish and print the result", false)
     .option("--timeout <seconds>", "with --wait", (v) => Number(v), 1800)
-    .action(async (promptArg: string | undefined, o: { project: string; model?: string; effort?: string; contextWindow?: string; fast?: boolean; title?: string; env?: string; base?: string; branch?: string; runtimeMode: RuntimeMode; interactionMode: InteractionMode; setupScript: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
+    .action(async (promptArg: string | undefined, o: { project: string; model?: string; effort?: string; contextWindow?: string; fast?: boolean; title?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; setupScript: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g, { write: true });
-      if (!RUNTIME_MODES.includes(o.runtimeMode)) throw new Error(`invalid --runtime-mode. Allowed: ${RUNTIME_MODES.join(", ")}`);
-      if (!INTERACTION_MODES.includes(o.interactionMode)) throw new Error(`invalid --interaction-mode. Allowed: ${INTERACTION_MODES.join(", ")}`);
+      const d = readConfig().defaults ?? {};
+      o.runtimeMode = o.runtimeMode ?? (d.runtimeMode as RuntimeMode | undefined) ?? "auto";
+      o.interactionMode = o.interactionMode ?? (d.interactionMode as InteractionMode | undefined) ?? "default";
+      o.model = o.model ?? d.model; o.effort = o.effort ?? d.effort; o.env = o.env ?? d.env;
+      const runtimeMode = o.runtimeMode; const interactionMode = o.interactionMode;
+      if (!RUNTIME_MODES.includes(runtimeMode)) throw new Error(`invalid --runtime-mode. Allowed: ${RUNTIME_MODES.join(", ")}`);
+      if (!INTERACTION_MODES.includes(interactionMode)) throw new Error(`invalid --interaction-mode. Allowed: ${INTERACTION_MODES.join(", ")}`);
       const text = readPrompt(promptArg, o);
       const shell = await withAuthRetry(ctx, g, api.shell);
       const project = matchProject(shell.projects, o.project);
@@ -227,16 +233,16 @@ export function registerThreads(program: Command) {
         threadId,
         message: { messageId: uuid(), role: "user", text, attachments: [] },
         modelSelection,
-        runtimeMode: o.runtimeMode,
-        interactionMode: o.interactionMode,
+        runtimeMode: runtimeMode,
+        interactionMode: interactionMode,
         bootstrap: {
-          createThread: { projectId: project.id, title, modelSelection, runtimeMode: o.runtimeMode, interactionMode: o.interactionMode, branch: useWorktree ? worktreeBranch : (currentBranch ?? null), worktreePath: null, createdAt },
+          createThread: { projectId: project.id, title, modelSelection, runtimeMode: runtimeMode, interactionMode: interactionMode, branch: useWorktree ? worktreeBranch : (currentBranch ?? null), worktreePath: null, createdAt },
           ...(useWorktree && baseBranch ? { prepareWorktree: { projectCwd: project.workspaceRoot, baseBranch, branch: worktreeBranch, ...(startFromOrigin ? { startFromOrigin: true } : {}) }, runSetupScript: o.setupScript } : {}),
         },
         createdAt,
       };
       const res = await withAuthRetry(ctx, g, (c) => dispatch(c, command));
-      const summary = { threadId, projectId: project.id, project: project.title, title, modelSelection, runtimeMode: o.runtimeMode, interactionMode: o.interactionMode, env: useWorktree ? "worktree" : "local", branch: useWorktree ? worktreeBranch : currentBranch ?? null, baseBranch: useWorktree ? baseBranch : null, sequence: res.sequence, url: `${ctx.server.origin}/thread/${threadId}` };
+      const summary = { threadId, projectId: project.id, project: project.title, title, modelSelection, runtimeMode: runtimeMode, interactionMode: interactionMode, env: useWorktree ? "worktree" : "local", branch: useWorktree ? worktreeBranch : currentBranch ?? null, baseBranch: useWorktree ? baseBranch : null, sequence: res.sequence, url: `${ctx.server.origin}/thread/${threadId}` };
       if (!o.wait) {
         emit(ctx.format, summary, () => `created ${threadId}\nproject  ${project.title}\ntitle    ${title}\nmodel    ${modelSelection.instanceId}/${modelSelection.model}${effortOf(modelSelection) ? "@" + effortOf(modelSelection) : ""}\nenv      ${summary.env}${useWorktree ? ` (${worktreeBranch} from ${baseBranch})` : ""}`);
         return;
