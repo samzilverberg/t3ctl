@@ -11,14 +11,17 @@ export function registerEnv(program: Command) {
       const g = program.opts<GlobalOpts>();
       const server = await discoverServer(g.origin);
       const d = server.descriptor;
-      emit(pickFormat(g.format), { origin: server.origin, source: server.source, ...d }, () =>
-        [
-          `origin    ${server.origin}  (via ${server.source}${isDesktopBackend(d) ? ", desktop backend = what the UI uses" : ", NOT the desktop backend"})`,
-          `label     ${d.label}`,
-          `env id    ${d.environmentId}`,
-          `version   ${d.serverVersion}  ${d.platform.os}/${d.platform.arch}`,
-          `caps      ${Object.entries(d.capabilities).filter(([, v]) => v === true).map(([k]) => k).join(", ")}`,
-        ].join("\n"),
+      emit(
+        pickFormat(g.format),
+        { origin: server.origin, source: server.source, isDesktopBackend: server.isDesktopBackend, degraded: server.degraded, ...d },
+        () =>
+          [
+            `origin    ${server.origin}  (via ${server.source}${server.isDesktopBackend ? ", desktop backend = what the UI uses" : ", NOT the desktop backend — the UI will not show live updates"})`,
+            `label     ${d.label}`,
+            `env id    ${d.environmentId}`,
+            `version   ${d.serverVersion}  ${d.platform.os}/${d.platform.arch}`,
+            `caps      ${Object.entries(d.capabilities).filter(([, v]) => v === true).map(([k]) => k).join(", ")}`,
+          ].join("\n"),
       );
     });
 

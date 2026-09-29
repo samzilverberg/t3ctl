@@ -4,7 +4,7 @@ Every command prints JSON when stdout is not a TTY or `T3CTL_AGENT=1`, a table o
 `<ref>` is an id, an id prefix, or an exact title (projects also accept their workspace root).
 
 ```
-t3ctl env                                  # which server we target (no auth)
+t3ctl env                                  # which server we target (no auth); JSON adds isDesktopBackend + degraded
 t3ctl servers                              # every running T3 server on 127.0.0.1:3773-3780
 t3ctl auth pair [--operate] | status | forget
 t3ctl models [-a] [--no-legacy]            # models per provider + allowed effort / context-window values

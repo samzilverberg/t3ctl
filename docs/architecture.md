@@ -32,6 +32,18 @@ a pure live-stream client, so dispatching to the service leaves the UI stale unt
 `desktop-managed` server.** The service is only a fallback (with a stderr warning). `--origin` / `T3CTL_ORIGIN` bypass
 discovery. `t3ctl servers` shows what is running. Tokens work on either process since they share the DB.
 
+Two hardening rules on top of that preference:
+
+- **Never fall back on a timeout.** The parallel pass uses a 1.5s per-probe timeout, which the desktop backend can
+  miss under load. If that pass finds no `desktop-managed` server but `server-runtime.json` records an origin whose
+  pid is alive and that we did not reach, that origin is retried twice (4s timeout, 200ms/400ms backoff) before any
+  fallback is accepted. The happy path is untouched: a desktop backend that answers the first probe returns
+  immediately, and a runtime-state origin that answered as a non-desktop server is not retried.
+- **Say so in JSON.** Agents read stdout, not stderr, so the warning alone is invisible to them. `t3ctl env` reports
+  `isDesktopBackend` and `degraded` (`true` when the selected server is not the desktop backend, whatever the reason
+  — fallback or an explicit `--origin`). Agents should treat `degraded: true` as "writes will not show up live in the
+  UI" and stop, or re-target.
+
 ## Write surface
 
 All writes are a `ClientOrchestrationCommand` sent through the WebSocket RPC

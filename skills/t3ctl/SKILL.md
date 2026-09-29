@@ -19,7 +19,7 @@ Only if it prints "t3 auth pairing create failed" should you tell the user to ch
 
 | Need | Command → JSON |
 |---|---|
-| Server / version | `t3ctl env` (must say "desktop backend = what the UI uses"; `t3ctl servers` lists all) |
+| Server / version | `t3ctl env` (require `"degraded": false`; on `true` you are on the boot-service and the UI will not update live — stop or retry; `t3ctl servers` lists all) |
 | Projects | `t3ctl projects` → `[{id,title,workspaceRoot,threadCount}]` |
 | Models + allowed efforts | `t3ctl models` → `[{instanceId,model,aliases,effort:"low|medium|high*|…"}]` |
 | Active threads | `t3ctl threads` → `[{id,title,status,projectTitle,branch,worktreePath,modelSelection,updatedAt}]` |
