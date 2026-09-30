@@ -30,6 +30,7 @@ src/commands/*.ts   one file per top-level command group (env, auth, models, pro
 src/ops.ts          createThread / createThreads (--batch) / startTurn shared by `threads new|send` and the scheduler
 src/guard.ts        duplicate + rate-limit guard for `threads new` (thresholds: config.json `guard`)
 src/errors.ts       CliError: code + details, printed as {"error":…} on stdout in JSON mode, custom exit code
+src/args.ts         shared commander argument parsers (intArg)
 src/discover.ts     find the server (config → server-runtime.json → probe :3773) via /.well-known/t3/environment
 src/auth.ts         pairing, token exchange, auto re-pair (ensureToken)
 src/keychain.ts     macOS `security` wrapper

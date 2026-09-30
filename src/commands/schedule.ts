@@ -2,9 +2,9 @@ import type { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { connect, withAuthRetry, type GlobalOpts } from "../context.js";
 import { api } from "../http.js";
-import { fetchProviders, resolveModel } from "../models.js";
+import { fetchConfig } from "../models.js";
 import { emit, pickFormat, renderTable, short } from "../output.js";
-import { applyDefaults, createThread, matchProject, matchThread, startTurn } from "../ops.js";
+import { applyDefaults, createThread, envModeOf, matchProject, matchThread, resolveNewModel, resolveTurnModel, startTurn } from "../ops.js";
 import { threadStatus } from "../wait.js";
 import { nowIso } from "../ids.js";
 import { acquireLock, describeWhen, evaluate, LOG_PATH, newJobId, parseDuration, parseSchedule, readStore, recordRun, SCHEDULE_PATH, writeStore, type Job, type Run } from "../schedule.js";
@@ -37,8 +37,14 @@ export function registerSchedule(program: Command) {
       const shell = await withAuthRetry(ctx, g, api.shell);
       const project = o.project ? matchProject(shell.projects, o.project) : undefined;
       if (o.thread) matchThread(shell.threads, o.thread);
-      if (o.model) resolveModel(await fetchProviders(ctx.server, ctx.client.token), o.model);
-      if (o.project) applyDefaults({ model: o.model, effort: o.effort, env: o.env });
+      if (project) {
+        const config = await fetchConfig(ctx.server, ctx.client.token);
+        const d = applyDefaults({ model: o.model, effort: o.effort, env: o.env });
+        await resolveNewModel(ctx, project, d, config);
+        envModeOf(d.env, config.settings);
+      } else {
+        await resolveTurnModel(ctx, matchThread(shell.threads, o.thread!), o);
+      }
 
       const job: Job = {
         id: newJobId(), createdAt: nowIso(), cron: s.cron, nextAt: s.nextAt, graceSec, runs: [],

@@ -61,9 +61,11 @@ printed on stdout as `{"error": {"code", "message", …details}}`:
 | `batch_partial` | 1 | `created[]` (summaries), `failedIndex`, `cause` |
 | `invalid_batch` | 1 | `index` when an item is at fault |
 | `thread_not_found` / `project_not_found` | 1 | `ref` (`known` titles for projects) |
-| `model_unknown` / `invalid_option` | 1 | `ref` / `option`, `allowed` (plus `index` inside a batch) |
+| `model_unknown` / `invalid_option` | 1 | `ref` / `option`, `allowed` or `input` for times and durations (plus `index` inside a batch) |
 | `no_server` | 1 | `origin` or `probed` |
-| `usage` | 1 | `commanderCode` (bad or missing flag/argument; commander prints usage on stderr) |
+| `auth` | 1 | not paired / token rejected / pairing failed (`status` when the server answered) |
+| `http_error` / `rpc_error` | 1 | `status`, `path` / `rpc` (server refused a request, e.g. 403 on a read-only token) |
+| `usage` | 1 | `commanderCode` (bad or missing flag/argument, non-numeric count/seconds; commander prints usage on stderr) |
 | `error` | 1 | anything unclassified |
 
 Prompt arguments (`threads new`, `threads send`, `schedule add`) accept `-` to read stdin; `--stdin` is kept as an
@@ -76,7 +78,7 @@ Derived the same way the UI does it: `running`, `idle`, `needs-approval`, `needs
 
 ## Thread creation defaults
 
-- **Model**: `--model` → project `defaultModelSelection` → server `textGenerationModelSelection`.
+- **Model**: `--model` → config `defaults.model` → project `defaultModelSelection` → server `textGenerationModelSelection`.
   `--effort` / `--context-window` / `--fast` are validated against the model's option descriptors from
   `server.getConfig` (`t3ctl models` prints them; `*` marks defaults).
 - **Env**: `--env` → server `defaultThreadEnvMode` (yours: `worktree`). Worktree mode needs the project root to

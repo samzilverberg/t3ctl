@@ -29,7 +29,7 @@ export function registerAuth(program: Command) {
     .description("Show the server's view of our session (GET /api/auth/session)")
     .action(async () => {
       const g = program.opts<GlobalOpts>();
-      const { client, format, server } = await connect({ ...g, noAutoPair: true });
+      const { client, format, server } = await connect({ ...g, autoPair: false });
       const s = await api.session(client);
       const cfg = readConfig();
       emit(format, { origin: server.origin, ...s, storedExpiresAt: cfg.expiresAt }, () =>

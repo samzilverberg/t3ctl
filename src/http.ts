@@ -1,7 +1,7 @@
 import type { Server } from "./discover.js";
 
 export class HttpError extends Error {
-  constructor(public status: number, public body: string, url: string) {
+  constructor(public status: number, public body: string, public url: string) {
     super(`${status} ${url}: ${body.slice(0, 300)}`);
   }
 }

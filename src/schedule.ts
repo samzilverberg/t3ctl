@@ -14,6 +14,7 @@ import { randomBytes } from "node:crypto";
 import { Cron } from "croner";
 import { CONFIG_DIR } from "./config.js";
 import { parseWhen } from "./time.js";
+import { CliError } from "./errors.js";
 import type { RuntimeMode, InteractionMode } from "./ops.js";
 
 export const SCHEDULE_PATH = join(CONFIG_DIR, "schedule.json");
@@ -57,7 +58,7 @@ export const newJobId = () => randomBytes(4).toString("hex");
 /** Parse a duration like 30m / 2h / 1d into seconds. */
 export function parseDuration(s: string): number {
   const m = /^(\d+)\s*(s|m|min|h|hr|d)?$/.exec(s.trim().toLowerCase());
-  if (!m) throw new Error(`cannot parse duration "${s}" (use 30m, 2h, 1d)`);
+  if (!m) throw new CliError("invalid_option", `cannot parse duration "${s}" (use 30m, 2h, 1d)`, { input: s });
   const n = Number(m[1]); const u = (m[2] ?? "m")[0];
   return n * (u === "s" ? 1 : u === "m" ? 60 : u === "h" ? 3600 : 86400);
 }

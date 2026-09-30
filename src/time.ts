@@ -2,6 +2,8 @@
  * Parse a "when" for snooze: ISO datetime, relative duration (30m, 2h, 3d, 1w), clock time (09:00 → today
  * if still ahead, else tomorrow), or "tomorrow [HH:MM]" (default 09:00). Returns ISO in UTC.
  */
+import { CliError } from "./errors.js";
+
 export function parseWhen(input: string, now = new Date()): string {
   const s = input.trim().toLowerCase();
   const dur = /^(\d+)\s*(m|min|h|hr|d|day|days|w|wk|week|weeks|hours?|minutes?)$/.exec(s);
@@ -21,5 +23,5 @@ export function parseWhen(input: string, now = new Date()): string {
   // Only date-shaped strings: Date.parse("90") is 1990, not "90 minutes".
   const t = /^\d{4}-\d{2}-\d{2}/.test(s) ? Date.parse(input) : NaN;
   if (!Number.isNaN(t)) return new Date(t).toISOString();
-  throw new Error(`cannot parse time "${input}" (use ISO, 30m/2h/3d/1w, HH:MM, or "tomorrow [HH:MM]")`);
+  throw new CliError("invalid_option", `cannot parse time "${input}" (use ISO, 30m/2h/3d/1w, HH:MM, or "tomorrow [HH:MM]")`, { input });
 }

@@ -9,6 +9,7 @@ import { createThread, createThreads, parseBatch, startTurn, matchThread, matchP
 import { parseWhen } from "../time.js";
 import { threadStatus, waitForIdle } from "../wait.js";
 import { MAX_BATCH, MIN_BATCH } from "../guard.js";
+import { intArg } from "../args.js";
 import { derivePendingApprovals, derivePendingUserInputs, type Activity } from "../pending.js";
 
 const APPROVAL_DECISIONS = ["accept", "acceptForSession", "acceptAlways", "decline"] as const;
@@ -50,10 +51,10 @@ export function registerThreads(program: Command) {
   threads
     .command("list", { isDefault: true })
     .description("List threads (active by default)")
-    .option("-p, --project <ref>", "filter by project id prefix or title")
+    .option("-p, --project <ref>", "filter by project id/prefix/title/path")
     .option("-s, --status <status>", "filter by derived status (running|idle|needs-approval|needs-input|error|archived)")
     .option("-a, --all", "include archived threads", false)
-    .option("-n, --limit <n>", "max rows", (v) => Number(v), 50)
+    .option("-n, --limit <n>", "max rows", intArg, 50)
     .option("-i, --ids <ids>", "comma-separated thread ids/prefixes to report on (implies -a; unknown ids reported with status missing)")
     .action(async (o: { project?: string; status?: string; all: boolean; limit: number; ids?: string }) => {
       const g = program.opts<GlobalOpts>();
@@ -81,8 +82,8 @@ export function registerThreads(program: Command) {
   threads
     .command("show <ref>")
     .description("Show a thread with its recent messages")
-    .option("-n, --turns <n>", "number of turns to fetch", (v) => Number(v), 5)
-    .addOption(new Option("-t <n>", "deprecated alias of -n").argParser((v) => Number(v)).hideHelp())
+    .option("-n, --turns <n>", "number of turns to fetch", intArg, 5)
+    .addOption(new Option("-t <n>", "deprecated alias of -n").argParser(intArg).hideHelp())
     .action(async (ref: string, o: { turns: number; t?: number }) => {
       if (o.t !== undefined) o.turns = o.t;
       const g = program.opts<GlobalOpts>();
@@ -105,7 +106,7 @@ export function registerThreads(program: Command) {
   threads
     .command("search <query>")
     .description("Full-text search across thread messages")
-    .option("-n, --limit <n>", "1..50", (v) => Number(v), 20)
+    .option("-n, --limit <n>", "1..50", intArg, 20)
     .action(async (query: string, o: { limit: number }) => {
       const ctx = await connect(program.opts<GlobalOpts>());
       const sock = new RpcSocket(ctx.server, ctx.client.token);
@@ -118,7 +119,7 @@ export function registerThreads(program: Command) {
   threads
     .command("watch <ref>")
     .description("Stream live thread events as NDJSON. Ctrl-C to stop.")
-    .option("--timeout <seconds>", "stop after N seconds", (v) => Number(v))
+    .option("--timeout <seconds>", "stop after N seconds", intArg)
     .action(async (ref: string, o: { timeout?: number }) => {
       const ctx = await connect(program.opts<GlobalOpts>());
       const shell = await api.shell(ctx.client);
@@ -135,7 +136,7 @@ export function registerThreads(program: Command) {
   threads
     .command("wait <ref>")
     .description("Block until the thread's current turn finishes or it needs a human. Exit 0 idle, 2 needs-human, 3 error, 4 timeout, 5 aborted.")
-    .option("--timeout <seconds>", "give up after N seconds", (v) => Number(v), 1800)
+    .option("--timeout <seconds>", "give up after N seconds", intArg, 1800)
     .option("--require-turn", "wait for a turn to start even if the thread is idle now", false)
     .action(async (ref: string, o: { timeout: number; requireTurn: boolean }) => {
       const ctx = await connect(program.opts<GlobalOpts>());
@@ -164,27 +165,28 @@ export function registerThreads(program: Command) {
     .option("--no-setup-script", "skip the project setup script in the new worktree")
     .option("--stdin", STDIN_ALIAS, false)
     .option("--wait", "wait for the first turn to finish and print the result", false)
-    .option("--timeout <seconds>", "with --wait", (v) => Number(v), 1800)
+    .option("--timeout <seconds>", "with --wait", intArg, 1800)
     .option("--draft", "create the thread without sending a message (no agent turn starts)", false)
     .option("--snooze <when>", "hide the thread from the sidebar until <when> (ISO, 30m/2h/3d, HH:MM, \"tomorrow 09:00\"). Visibility only: a started turn keeps running.")
     .option("--batch <file>", `create ${MIN_BATCH}-${MAX_BATCH} threads: JSON array of prompts or {prompt,title?,model?,effort?,branch?} ('-' = stdin). Other flags apply to all. Skips the duplicate check against recent threads, not the rate limit.`)
     .action(async (promptArg: string | undefined, o: { batch?: string; draft: boolean; snooze?: string; project: string; model?: string; effort?: string; contextWindow?: string; fast?: boolean; title?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; setupScript: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
       const g = program.opts<GlobalOpts>();
+      if (o.draft && o.wait) throw new Error("--draft starts no turn, so there is nothing to --wait for");
+      const shared = { project: o.project, model: o.model, effort: o.effort, contextWindow: o.contextWindow, fast: o.fast, env: o.env, base: o.base, runtimeMode: o.runtimeMode, interactionMode: o.interactionMode, setupScript: o.setupScript, draft: o.draft, snooze: o.snooze };
       if (o.batch !== undefined) {
         const clash = [promptArg !== undefined && "a prompt argument", o.stdin && "--stdin", o.title && "-t", o.branch && "--branch", o.wait && "--wait"].filter(Boolean);
         if (clash.length) throw new Error(`--batch cannot be combined with ${clash.join(", ")} (set title/branch per item; wait with \`threads wait <id>\`)`);
         const items = parseBatch(readFileSync(o.batch === "-" ? 0 : o.batch, "utf8"));
         const ctx = await connect(g, { write: true });
-        const base = { project: o.project, model: o.model, effort: o.effort, contextWindow: o.contextWindow, fast: o.fast, env: o.env, base: o.base, runtimeMode: o.runtimeMode, interactionMode: o.interactionMode, setupScript: o.setupScript, draft: o.draft, snooze: o.snooze };
-        const created = await createThreads(ctx, g, base, items);
+        const created = await createThreads(ctx, g, shared, items);
         emit(ctx.format, created, () => renderTable(created.map((c) => ({ id: c.threadId, title: c.title, model: `${c.modelSelection.model}${effortOf(c.modelSelection) ? "@" + effortOf(c.modelSelection) : ""}`, env: c.env, branch: c.branch ?? "" })), ["id", "title", "model", "env", "branch"]));
         return;
       }
       const ctx = await connect(g, { write: true });
       const text = o.draft && promptArg === undefined && !o.stdin ? "" : readPrompt(promptArg, o);
-      const summary = await createThread(ctx, g, { ...o, text }, { guard: true });
+      const summary = await createThread(ctx, g, { ...shared, title: o.title, branch: o.branch, text }, { guard: true });
       const { threadId, modelSelection, snoozedUntil, project, title } = summary;
-      if (!o.wait || o.draft) {
+      if (!o.wait) {
         emit(ctx.format, summary, () => `created ${threadId}${o.draft ? " (draft, no turn started)" : ""}\nproject  ${project}\ntitle    ${title}\nmodel    ${modelSelection.instanceId}/${modelSelection.model}${effortOf(modelSelection) ? "@" + effortOf(modelSelection) : ""}\nenv      ${summary.env}${summary.env === "worktree" ? ` (${summary.branch} from ${summary.baseBranch})` : ""}${snoozedUntil ? `\nsnoozed  until ${snoozedUntil}` : ""}`);
         return;
       }
@@ -203,7 +205,7 @@ export function registerThreads(program: Command) {
     .option("--interaction-mode <mode>", INTERACTION_MODES.join("|"))
     .option("--stdin", STDIN_ALIAS, false)
     .option("--wait", "wait for the turn to finish", false)
-    .option("--timeout <seconds>", "with --wait", (v) => Number(v), 1800)
+    .option("--timeout <seconds>", "with --wait", intArg, 1800)
     .action(async (ref: string, promptArg: string | undefined, o: { model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; stdin: boolean; wait: boolean; timeout: number }) => {
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g, { write: true });

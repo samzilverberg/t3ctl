@@ -28,7 +28,8 @@ Only if it prints "t3 auth pairing create failed" should you tell the user to ch
 | Find by content | `t3ctl threads search "<words>"` → `[{threadId,source,snippet}]` |
 
 `status`: `running`, `idle`, `needs-approval`, `needs-input`, `error`, `interrupted`, `archived`, `new`.
-`<ref>` = full id, id prefix, or exact title. Prefer full ids in anything you write down.
+`<ref>` = full id, id prefix, or exact title (projects also take their workspace path, e.g. `.`). An empty ref is an
+error, never "the first one". Prefer full ids in anything you write down.
 
 ## Write
 

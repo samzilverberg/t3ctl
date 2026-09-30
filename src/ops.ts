@@ -45,14 +45,18 @@ export interface NewThreadSummary {
 }
 
 export function matchThread(threads: ShellThread[], ref: string): ShellThread {
+  // An empty ref would prefix-match everything (an unset "$VAR" must not pick the first thread).
+  if (!ref.trim()) throw new CliError("thread_not_found", "empty thread ref", { ref });
   const t = threads.find((x) => x.id === ref) ?? threads.find((x) => x.id.startsWith(ref)) ?? threads.find((x) => x.title === ref);
   if (!t) throw new CliError("thread_not_found", `thread not found: ${ref}`, { ref });
   return t;
 }
-/** id, id prefix, exact title, or workspace root (absolute, or relative to cwd such as `.`). */
+/** id, id prefix, exact title, or workspace root (a path: contains `/`, or is `.` / `..`; relative to cwd). */
 export function matchProject(projects: ShellProject[], ref: string): ShellProject {
+  if (!ref.trim()) throw new CliError("project_not_found", `empty project ref. Known: ${projects.map((x) => x.title).join(", ")}`, { ref, known: projects.map((x) => x.title) });
+  const path = ref.includes("/") || ref === "." || ref === ".." ? resolve(ref) : undefined;
   const p = projects.find((x) => x.id === ref) ?? projects.find((x) => x.id.startsWith(ref)) ?? projects.find((x) => x.title === ref)
-    ?? projects.find((x) => x.workspaceRoot === ref) ?? projects.find((x) => x.workspaceRoot === resolve(ref));
+    ?? (path ? projects.find((x) => x.workspaceRoot === path) : undefined);
   if (!p) throw new CliError("project_not_found", `project not found: ${ref}. Known: ${projects.map((x) => x.title).join(", ")}`, { ref, known: projects.map((x) => x.title) });
   return p;
 }
@@ -69,6 +73,13 @@ export function applyDefaults<T extends Pick<NewThreadOpts, "runtimeMode" | "int
   if (!RUNTIME_MODES.includes(runtimeMode)) throw new CliError("invalid_option", `invalid --runtime-mode. Allowed: ${RUNTIME_MODES.join(", ")}`, { option: "runtimeMode", allowed: RUNTIME_MODES });
   if (!INTERACTION_MODES.includes(interactionMode)) throw new CliError("invalid_option", `invalid --interaction-mode. Allowed: ${INTERACTION_MODES.join(", ")}`, { option: "interactionMode", allowed: INTERACTION_MODES });
   return { ...o, runtimeMode, interactionMode, model: o.model ?? d.model, effort: o.effort ?? d.effort, env: o.env ?? d.env };
+}
+
+/** `--env` value → worktree|local (default: server setting, else worktree). */
+export function envModeOf(env: string | undefined, settings: Record<string, unknown>): "worktree" | "local" {
+  const mode = (env ?? (settings.defaultThreadEnvMode as string | undefined) ?? "worktree").toLowerCase();
+  if (mode !== "worktree" && mode !== "local") throw new CliError("invalid_option", "--env must be worktree|local", { option: "env", allowed: ["worktree", "local"] });
+  return mode;
 }
 
 /** Resolve the model selection for a new thread: explicit flags → project default → server default. */
@@ -113,8 +124,7 @@ export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts
   if (guard) await enforceGuard(ctx.client, shell.threads, project, { title, text });
   const { modelSelection, settings } = await resolveNewModel(ctx, project, o, config);
 
-  const envMode = (o.env ?? (settings.defaultThreadEnvMode as string | undefined) ?? "worktree").toLowerCase();
-  if (envMode !== "worktree" && envMode !== "local") throw new CliError("invalid_option", "--env must be worktree|local", { option: "env", allowed: ["worktree", "local"] });
+  const envMode = envModeOf(o.env, settings);
   const currentBranch = gitCurrentBranch(project.workspaceRoot);
   const useWorktree = envMode === "worktree" && Boolean(currentBranch) && currentBranch !== "HEAD";
   const baseBranch = o.base ?? currentBranch;
@@ -226,18 +236,22 @@ export async function createThreads(ctx: Ctx, g: GlobalOpts, base: Omit<NewThrea
 
 export interface SendOpts { text: string; model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode }
 
+/** Model for a follow-up turn: the thread's own, or `model`/`effort` overrides validated against the catalog. */
+export async function resolveTurnModel(ctx: Ctx, t: ShellThread, o: Pick<SendOpts, "model" | "effort">): Promise<ModelSelection | undefined> {
+  const current = t.modelSelection as ModelSelection | undefined;
+  if (!o.model && !o.effort) return current;
+  const providers = await fetchProviders(ctx.server, ctx.client.token);
+  const resolved = resolveModel(providers, o.model ?? `${current?.instanceId}/${current?.model}`);
+  const baseEffort = (current?.options ?? []).find((x) => x.id === "effort")?.value;
+  return buildModelSelection(resolved, { effort: o.effort ?? (typeof baseEffort === "string" ? baseEffort : undefined) });
+}
+
 /** Start a follow-up turn on an existing (idle, non-archived) thread. */
 export async function startTurn(ctx: Ctx, g: GlobalOpts, t: ShellThread, o: SendOpts): Promise<{ threadId: string; sequence: number }> {
   const status = threadStatus(t);
   if (status === "running") throw new Error(`thread ${short(t.id)} is running; interrupt it or wait first`);
   if (t.archivedAt) throw new Error(`thread ${short(t.id)} is archived`);
-  let modelSelection = t.modelSelection as ModelSelection | undefined;
-  if (o.model || o.effort) {
-    const providers = await fetchProviders(ctx.server, ctx.client.token);
-    const resolved = resolveModel(providers, o.model ?? `${modelSelection?.instanceId}/${modelSelection?.model}`);
-    const baseEffort = (modelSelection?.options ?? []).find((x) => x.id === "effort")?.value;
-    modelSelection = buildModelSelection(resolved, { effort: o.effort ?? (typeof baseEffort === "string" ? baseEffort : undefined) });
-  }
+  const modelSelection = await resolveTurnModel(ctx, t, o);
   const command = {
     type: "thread.turn.start",
     commandId: uuid(),

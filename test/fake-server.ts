@@ -101,13 +101,13 @@ export async function startFake(): Promise<Fake> {
  * Run the real CLI (via tsx) against `origin` with `T3CTL_TOKEN` and a fresh config dir (no stored scopes: the env
  * token must be used as-is, never trigger a pairing). `config` seeds config.json.
  */
-export function runCli(origin: string, args: string[], stdin?: string, config: Record<string, unknown> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+export function runCli(origin: string, args: string[], stdin?: string, config: Record<string, unknown> = {}, env: Record<string, string> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   const configDir = mkdtempSync(join(tmpdir(), "t3ctl-cfg-"));
   writeFileSync(join(configDir, "config.json"), JSON.stringify(config));
   const entry = new URL("../src/index.ts", import.meta.url).pathname;
   return new Promise((resolve) => {
     const child = execFile(process.execPath, ["--import", "tsx", entry, "--origin", origin, "-f", "json", ...args], {
-      env: { ...process.env, T3CTL_TOKEN: "fake-token", T3CTL_CONFIG_DIR: configDir },
+      env: { ...process.env, T3CTL_TOKEN: "fake-token", T3CTL_CONFIG_DIR: configDir, ...env },
     }, (err, stdout, stderr) => resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }));
     if (stdin !== undefined) child.stdin?.end(stdin); else child.stdin?.end();
   });

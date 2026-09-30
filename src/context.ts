@@ -1,10 +1,12 @@
 import { discoverServer, type Server } from "./discover.js";
 import { ensureToken, pair, READ_SCOPES, OPERATE_SCOPES } from "./auth.js";
 import { makeClient, HttpError, type Client } from "./http.js";
+import { CliError } from "./errors.js";
 import { pickFormat, type Format } from "./output.js";
 import { readConfig } from "./config.js";
 
-export interface GlobalOpts { origin?: string; format?: string; noAutoPair?: boolean }
+/** `autoPair` is commander's name for `--no-auto-pair` (false when the flag is given). */
+export interface GlobalOpts { origin?: string; format?: string; autoPair?: boolean }
 
 export interface Ctx { server: Server; client: Client; format: Format }
 
@@ -15,7 +17,7 @@ export interface Ctx { server: Server; client: Client; format: Format }
 export async function connect(opts: GlobalOpts, { write = false } = {}): Promise<Ctx> {
   const server = await discoverServer(opts.origin);
   const need = write ? OPERATE_SCOPES : READ_SCOPES;
-  const token = await ensureToken(server, need, { autoPair: !opts.noAutoPair });
+  const token = await ensureToken(server, need, { autoPair: opts.autoPair !== false });
   return { server, client: makeClient(server, token), format: pickFormat(opts.format) };
 }
 
@@ -26,8 +28,9 @@ export async function withAuthRetry<T>(ctx: Ctx, opts: GlobalOpts, fn: (c: Clien
   try {
     return await fn(ctx.client);
   } catch (e) {
-    if (!(e instanceof HttpError) || e.status !== 401 || opts.noAutoPair) throw e;
-    if (process.env.T3CTL_TOKEN) throw new Error("server rejected T3CTL_TOKEN (401); unset it to use the stored session, or mint a new token");
+    if (!(e instanceof HttpError) || e.status !== 401) throw e;
+    if (process.env.T3CTL_TOKEN) throw new CliError("auth", "server rejected T3CTL_TOKEN (401); unset it to use the stored session, or mint a new token", { status: 401 });
+    if (opts.autoPair === false) throw new CliError("auth", "server rejected the stored token (401); run `t3ctl auth pair` (or drop --no-auto-pair)", { status: 401 });
     process.stderr.write("t3ctl: server rejected stored token (401); re-pairing…\n");
     const cfg = readConfig();
     const res = await pair(ctx.server, { label: cfg.label, operate: (cfg.scopes ?? []).includes("orchestration:operate") });

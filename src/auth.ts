@@ -5,6 +5,7 @@ import { hostname } from "node:os";
 import { T3_HOME, readConfig, writeConfig } from "./config.js";
 import { keychainDelete, keychainGet, keychainSet } from "./keychain.js";
 import type { Server } from "./discover.js";
+import { CliError } from "./errors.js";
 
 /** Scopes this CLI requests. Read-only by default; `operate` only when a write command needs it. */
 export const READ_SCOPES = ["orchestration:read"];
@@ -39,7 +40,7 @@ export function mintPairingCredential(server: Server, label: string): PairingCre
   const [cmd, ...pre] = findT3Bin(server.descriptor.serverVersion);
   const args = [...pre, "auth", "pairing", "create", "--json", "--ttl", "2m", "--label", label];
   const r = spawnSync(cmd, args, { encoding: "utf8", env: { ...process.env, NODE_NO_WARNINGS: "1" } });
-  if (r.status !== 0) throw new Error(`t3 auth pairing create failed:\n${r.stderr}`);
+  if (r.status !== 0) throw new CliError("auth", `t3 auth pairing create failed:\n${r.stderr}`);
   const jsonStart = r.stdout.indexOf("{");
   if (jsonStart < 0) throw new Error(`unexpected pairing output:\n${r.stdout}`);
   return JSON.parse(r.stdout.slice(jsonStart)) as PairingCredential;
@@ -60,7 +61,7 @@ export async function exchangePairingCredential(server: Server, credential: stri
     client_os: process.platform,
   });
   const r = await fetch(`${server.origin}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
-  if (!r.ok) throw new Error(`token exchange failed: ${r.status} ${await r.text()}`);
+  if (!r.ok) throw new CliError("auth", `token exchange failed: ${r.status} ${await r.text()}`, { status: r.status });
   return (await r.json()) as TokenResponse;
 }
 
@@ -98,7 +99,7 @@ export async function ensureToken(server: Server, needScopes: string[] = READ_SC
   const expired = cfg.expiresAt ? Date.parse(cfg.expiresAt) - Date.now() < 60_000 : false;
   if (stored && !expired && missing.length === 0) return stored;
   if (opts.autoPair === false) {
-    throw new Error(stored ? `Stored session lacks scopes [${missing.join(", ")}] or is expired. Run: t3ctl auth pair${missing.includes("orchestration:operate") ? " --operate" : ""}` : `Not paired with ${server.descriptor.label} (${server.origin}). Run: t3ctl auth pair`);
+    throw new CliError("auth", stored ? `Stored session lacks scopes [${missing.join(", ")}] or is expired. Run: t3ctl auth pair${missing.includes("orchestration:operate") ? " --operate" : ""}` : `Not paired with ${server.descriptor.label} (${server.origin}). Run: t3ctl auth pair`);
   }
   // Keep operate if we already had it, or if the caller needs it.
   const operate = have.has("orchestration:operate") || needScopes.includes("orchestration:operate");

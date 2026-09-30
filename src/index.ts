@@ -11,6 +11,8 @@ import { registerModels } from "./commands/models.js";
 import { registerSchedule } from "./commands/schedule.js";
 import { CliError } from "./errors.js";
 import { pickFormat } from "./output.js";
+import { HttpError } from "./http.js";
+import { RpcFailure } from "./ws.js";
 
 const program = new Command()
   .name("t3ctl")
@@ -38,9 +40,10 @@ program.parseAsync(process.argv).catch((err: unknown) => {
   if (err instanceof CommanderError && err.exitCode === 0) process.exit(0); // --help / --version
   const usage = err instanceof CommanderError;
   const msg = usage ? err.message.replace(/^error: /, "") : err instanceof Error ? err.message : String(err);
-  const code = err instanceof CliError ? err.code : usage ? "usage" : "error";
+  const code = err instanceof CliError ? err.code : usage ? "usage" : err instanceof HttpError ? "http_error" : err instanceof RpcFailure ? "rpc_error" : "error";
   if (pickFormat(program.opts<{ format?: string }>().format) === "json") {
-    const details = err instanceof CliError ? err.details : usage ? { commanderCode: err.code } : {};
+    const details = err instanceof CliError ? err.details : usage ? { commanderCode: err.code }
+      : err instanceof HttpError ? { status: err.status, path: err.url } : err instanceof RpcFailure ? { rpc: err.tag } : {};
     process.stdout.write(JSON.stringify({ error: Object.assign({ code, message: msg }, details, { code, message: msg }) }, null, 2) + "\n");
   }
   if (!usage) process.stderr.write(`t3ctl: ${msg}\n`); // commander already printed usage errors
