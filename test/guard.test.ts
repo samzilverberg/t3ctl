@@ -84,7 +84,7 @@ test("createThread guard: near-identical prompt 11 s after the first → duplica
     assert.equal(d.duplicate.threadId, first.threadId);
     assert.equal(d.duplicate.title, first.title);
     assert.equal(d.duplicate.secondsAgo, 11);
-    assert.match((e as Error).message, /--force/);
+    assert.equal((e as CliError).details.retryAfterSec, 49);
     return true;
   });
   assert.equal(fake.commands.length, 1);
@@ -111,14 +111,16 @@ test("createThreads: creates each item, skips the duplicate check, enforces cap 
   assert.equal(fake.commands.length, 3);
   // 4 in the window now; 2 more would make 6 > 5.
   await assert.rejects(createThreads(fake.ctx, {}, { project: "dev" }, [{ text: "a" }, { text: "b" }]), guardErr("rate_limited"));
-  assert.equal((await createThreads(fake.ctx, {}, { project: "dev" }, [{ text: "a" }, { text: "b" }], { force: true })).length, 2);
-  await assert.rejects(createThreads(fake.ctx, {}, { project: "dev" }, Array(6).fill({ text: "x" }), { force: true }), /1\.\.5 threads per call/);
+  // Once they age out of the window there is room again.
+  for (const t of fake.threads) t.createdAt = new Date(Date.now() - 61_000).toISOString();
+  assert.equal((await createThreads(fake.ctx, {}, { project: "dev" }, [{ text: "a" }, { text: "b" }])).length, 2);
+  await assert.rejects(createThreads(fake.ctx, {}, { project: "dev" }, Array(6).fill({ text: "x" })), /1\.\.5 threads per call/);
   assert.equal(fake.commands.length, 5);
 });
 
 // ---- The real CLI, end to end ----
 
-test("cli: duplicate → exit 6 with machine-readable error; --force creates anyway", async () => {
+test("cli: duplicate → exit 6 with machine-readable error; --force is not an option", async () => {
   const first = fake.seed("Fix CJS build", PROMPT_A, 11);
   const dup = await runCli(fake.origin, ["threads", "new", "-p", "dev", PROMPT_B]);
   assert.equal(dup.code, GUARD_EXIT, dup.stderr);
@@ -130,9 +132,11 @@ test("cli: duplicate → exit 6 with machine-readable error; --force creates any
   assert.match(dup.stderr, /t3ctl: a very similar thread 00000000 "Fix CJS build" was created 1\ds ago/);
   assert.equal(fake.commands.length, 0);
 
+  assert.equal(typeof err.retryAfterSec, "number");
   const forced = await runCli(fake.origin, ["threads", "new", "-p", "dev", "--force", PROMPT_B]);
-  assert.equal(forced.code, 0, forced.stderr);
-  assert.equal(JSON.parse(forced.stdout).threadId, fake.commands[0].threadId);
+  assert.equal(forced.code, 1);
+  assert.match(forced.stderr, /unknown option '--force'/);
+  assert.equal(fake.commands.length, 0);
 });
 
 test("cli: --batch from stdin creates several threads; flag clashes and cap are rejected", async () => {

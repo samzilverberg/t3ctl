@@ -72,8 +72,8 @@ Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high
 - Each `threads new` (without `--draft`) starts a paid agent turn. One thread per task; use `send` for follow-ups.
 - `threads new` exits 6 with `{"error":{"code":"duplicate_thread","duplicate":{threadId,title,secondsAgo}}}` when a
   very similar thread was just created in the project. That usually means you (or a repeated user message) already
-  started this task: check that thread (`threads show <threadId> -t 1`) and use it. Pass `--force` only if you are
-  sure a second thread is wanted. `rate_limited` (also exit 6) means 5+ threads were created in the project in the
+  started this task: check that thread (`threads show <threadId> -t 1`) and use it. Only if a second thread is
+  really wanted, retry after `retryAfterSec`. `rate_limited` (also exit 6) means 5+ threads were created in the project in the
   last minute: stop and check for a loop. Need several threads for one request? Use one `--batch` call.
 - Snooze hides a thread; it does not delay or schedule work. To run a task later use `schedule add`. The thread id
   only exists after the job fires: read it from `t3ctl schedule -a` (`runs[].threadId`).

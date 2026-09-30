@@ -5,8 +5,9 @@
  *  - duplicate: one created within `windowSec` whose first prompt (or, when either side has no prompt, title)
  *    is at least `similarity` alike (Dice coefficient over character trigrams of the normalized text)
  *  - rate limit: `rateMax` threads already created in the project within `rateWindowSec`
- * Best effort by design: two calls racing inside the same second can both pass. `--force` skips both checks;
- * the scheduler never runs them. Thresholds are tunable via config.json `guard`.
+ * Best effort by design: two calls racing inside the same second can both pass. There is no per-call override:
+ * callers wait (`retryAfterSec`) or use `--batch`. The scheduler never runs the guard. Thresholds are tunable via
+ * config.json `guard`.
  */
 import { readConfig } from "./config.js";
 import { CliError } from "./errors.js";
@@ -82,13 +83,14 @@ export function findDuplicate(candidates: Candidate[], next: { title: string; te
   return best;
 }
 
-export function duplicateError(project: string, d: DuplicateMatch): CliError {
+export function duplicateError(project: string, d: DuplicateMatch, cfg: GuardConfig): CliError {
+  const retryAfterSec = Math.max(1, cfg.windowSec - d.secondsAgo);
   return new CliError(
     "duplicate_thread",
     `a very similar thread ${short(d.threadId)} "${d.title}" was created ${d.secondsAgo}s ago in project ${project} ` +
-      `(${d.matchedOn} ${Math.round(d.similarity * 100)}% alike). Check whether you already created a thread for this task; ` +
-      `pass --force to create anyway (or --batch to create several related threads at once).`,
-    { project, duplicate: d, hint: "pass --force to create anyway" },
+      `(${d.matchedOn} ${Math.round(d.similarity * 100)}% alike). Check whether you already created a thread for this task. ` +
+      `If a second one is really wanted, retry in ${retryAfterSec}s (or use --batch for several related threads at once).`,
+    { project, duplicate: d, retryAfterSec },
     GUARD_EXIT,
   );
 }
@@ -106,11 +108,10 @@ export function checkRate(threads: ShellThread[], projectId: string, project: st
     "rate_limited",
     `${recent.length} thread(s) were already created in project ${project} in the last ${cfg.rateWindowSec}s ` +
       `(limit ${cfg.rateMax}${n > 1 ? `, this call adds ${n}` : ""}). Check that you are not creating threads in a loop` +
-      `${retryAfterSec ? `; retry in ${retryAfterSec}s` : ""} or pass --force.`,
+      `${retryAfterSec ? `; retry in ${retryAfterSec}s` : ""}.`,
     {
       project, limit: { max: cfg.rateMax, windowSec: cfg.rateWindowSec }, requested: n, retryAfterSec,
       recent: recent.map((t) => ({ threadId: t.id, title: t.title, createdAt: t.createdAt, secondsAgo: Math.max(0, Math.round(ageSec(t, now))) })),
-      hint: "pass --force to create anyway",
     },
     GUARD_EXIT,
   );
@@ -133,7 +134,7 @@ export async function enforceGuard(client: Client, threads: ShellThread[], proje
     const recent = recentThreads(threads, project.id, cfg.windowSec, now);
     const candidates = await Promise.all(recent.map(async (thread) => ({ thread, prompt: next.text ? await firstPrompt(client, thread.id) : undefined })));
     const dup = findDuplicate(candidates, next, now, cfg);
-    if (dup) throw duplicateError(project.title, dup);
+    if (dup) throw duplicateError(project.title, dup, cfg);
   }
   checkRate(threads, project.id, project.title, 1, now, cfg);
 }

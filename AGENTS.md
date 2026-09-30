@@ -95,7 +95,7 @@ longer than a minute. Remove test jobs afterwards (`schedule remove <id>`).
 
 Approval paths: create with `--runtime-mode approval-required` and a prompt that writes a file under `/tmp`;
 `threads pending` → `threads approve`. Guard paths: run the same `threads new` twice within a minute (second
-exits 6 `duplicate_thread`), repeat with `--force`, then `--batch -` with 3 items; a sixth create inside the minute
+exits 6 `duplicate_thread`), then `--batch -` with 3 items; a sixth create inside the minute
 exits 6 `rate_limited`. Archive everything afterwards. Snooze paths: `--draft --snooze 2h` then `unsnooze`. Never test writes
 against real work threads; never archive or interrupt a thread you did not create.
 

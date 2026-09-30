@@ -21,7 +21,7 @@ t3ctl threads wait <ref> [--timeout s] [--require-turn]      # exit 0 idle · 2 
 t3ctl threads new  -p <project> [-m model] [-e effort] [--context-window 1m] [--fast]
                    [-t title] [--env worktree|local] [--base br] [--branch br]
                    [--runtime-mode …] [--interaction-mode default|plan] [--no-setup-script]
-                   [--wait] [--stdin] [--force] "<prompt>"
+                   [--wait] [--stdin] "<prompt>"
 t3ctl threads new -p <project> [shared flags] --batch <file|->   # up to 5 threads in one call
 t3ctl threads new … --draft [--snooze <when>]                # create without starting a turn
 t3ctl threads send <ref> [-m model] [-e effort] [--wait] "<prompt>"
@@ -80,14 +80,15 @@ already has in the target project and refuses with exit `6` when:
 
 ```json
 {"error": {"code": "duplicate_thread", "message": "a very similar thread c910869f \"Fix CJS build\" was created 11s ago …",
-  "project": "dev", "hint": "pass --force to create anyway",
+  "project": "dev", "retryAfterSec": 49,
   "duplicate": {"threadId": "c910869f-…", "title": "Fix CJS build", "createdAt": "…", "secondsAgo": 11, "similarity": 0.91, "matchedOn": "prompt"}}}
 {"error": {"code": "rate_limited", "message": "5 thread(s) were already created in project dev in the last 60s …",
   "project": "dev", "limit": {"max": 5, "windowSec": 60}, "requested": 1, "retryAfterSec": 48,
-  "recent": [{"threadId": "…", "title": "…", "createdAt": "…", "secondsAgo": 12}], "hint": "pass --force to create anyway"}}
+  "recent": [{"threadId": "…", "title": "…", "createdAt": "…", "secondsAgo": 12}]}}
 ```
 
-`--force` skips both checks. It is best effort, not a lock: two calls racing within the same second can both
+There is no per-call override: wait `retryAfterSec` (the duplicate check only looks back `windowSec`), or use
+`--batch` when several related threads are wanted. It is best effort, not a lock: two calls racing within the same second can both
 pass. The happy path costs nothing extra (the shell snapshot is fetched anyway; only threads inside the window
 get their first prompt fetched). The scheduler does not use the guard.
 
@@ -116,7 +117,7 @@ JSON
 `model`, `effort`, `branch`. Every other flag (`-p`, `-m`, `-e`, `--env`, `--runtime-mode`, `--draft`, `--snooze`,
 …) applies to all items. Not allowed with a prompt argument, `--stdin`, `-t`, `--branch` or `--wait` (wait per id
 with `threads wait`). Capped at 5 items. The duplicate check is skipped (the items are meant to be related); the
-rate limit still counts the whole batch unless `--force`. Threads are created in order; if one fails, the error
+rate limit still counts the whole batch. Threads are created in order; if one fails, the error
 is `batch_partial` with `created` (summaries so far), `failedIndex` and `cause`. Output: an array of the usual
 `threads new` summaries.
 

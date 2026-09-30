@@ -93,7 +93,7 @@ export async function resolveNewModel(ctx: Ctx, project: ShellProject, o: Pick<N
 
 /**
  * Create a thread; unless `draft`, also start its first turn with `text`. `guard` runs the duplicate / rate-limit
- * check (src/guard.ts) first; `threads new` enables it unless --force, the scheduler does not.
+ * check (src/guard.ts) first; `threads new` enables it, the scheduler does not.
  */
 export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts, { guard = false } = {}): Promise<NewThreadSummary> {
   const o = applyDefaults(input);
@@ -174,9 +174,9 @@ export function parseBatch(raw: string): BatchItem[] {
 
 /**
  * Create up to MAX_BATCH threads in one call, sequentially. Skips the duplicate check by intent (the caller asked
- * for several related threads) but still applies the rate limit for the whole batch unless `force`.
+ * for several related threads) but still applies the rate limit for the whole batch.
  */
-export async function createThreads(ctx: Ctx, g: GlobalOpts, base: Omit<NewThreadOpts, "text" | "title" | "branch">, items: BatchItem[], { force = false } = {}): Promise<NewThreadSummary[]> {
+export async function createThreads(ctx: Ctx, g: GlobalOpts, base: Omit<NewThreadOpts, "text" | "title" | "branch">, items: BatchItem[]): Promise<NewThreadSummary[]> {
   if (items.length === 0 || items.length > MAX_BATCH) throw new Error(`--batch: 1..${MAX_BATCH} threads per call (got ${items.length})`);
   items.forEach((it, i) => {
     if (!base.draft && !it.text.trim()) throw new Error(`--batch[${i}]: missing prompt`);
@@ -184,11 +184,9 @@ export async function createThreads(ctx: Ctx, g: GlobalOpts, base: Omit<NewThrea
   });
   const branches = items.map((it) => it.branch).filter(Boolean);
   if (new Set(branches).size !== branches.length) throw new Error("--batch: branch names must be unique");
-  if (!force) {
-    const shell = await withAuthRetry(ctx, g, api.shell);
-    const project = matchProject(shell.projects, base.project);
-    checkRate(shell.threads, project.id, project.title, items.length, new Date(), guardConfig());
-  }
+  const shell = await withAuthRetry(ctx, g, api.shell);
+  const project = matchProject(shell.projects, base.project);
+  checkRate(shell.threads, project.id, project.title, items.length, new Date(), guardConfig());
   const created: NewThreadSummary[] = [];
   for (const [i, it] of items.entries()) {
     try {

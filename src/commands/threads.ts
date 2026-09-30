@@ -149,7 +149,7 @@ export function registerThreads(program: Command) {
 
   threads
     .command("new [prompt]")
-    .description(`Create a thread in a project and send the first message. Prints the new thread id. Refuses (exit 6) when a very similar thread was just created in the project or too many were created recently; --force overrides, --batch creates up to ${MAX_BATCH} at once.`)
+    .description(`Create a thread in a project and send the first message. Prints the new thread id. Refuses (exit 6) when a very similar thread was just created in the project or too many were created recently; --batch creates up to ${MAX_BATCH} at once.`)
     .requiredOption("-p, --project <ref>", "project id/prefix/title/workspaceRoot")
     .option("-m, --model <ref>", "model slug or alias, optionally instanceId/slug (default: project default → server default)")
     .option("-e, --effort <level>", "reasoning effort (low|medium|high|xhigh|max|…, validated per model)")
@@ -167,9 +167,8 @@ export function registerThreads(program: Command) {
     .option("--timeout <seconds>", "with --wait", (v) => Number(v), 1800)
     .option("--draft", "create the thread without sending a message (no agent turn starts)", false)
     .option("--snooze <when>", "hide the thread from the sidebar until <when> (ISO, 30m/2h/3d, HH:MM, \"tomorrow 09:00\"). Visibility only: a started turn keeps running.")
-    .option("--force", "skip the duplicate / rate-limit guard", false)
     .option("--batch <file>", `create up to ${MAX_BATCH} threads: JSON array of prompts or {prompt,title?,model?,effort?,branch?} ('-' = stdin). Other flags apply to all. Skips the duplicate check, not the rate limit.`)
-    .action(async (promptArg: string | undefined, o: { force: boolean; batch?: string; draft: boolean; snooze?: string; project: string; model?: string; effort?: string; contextWindow?: string; fast?: boolean; title?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; setupScript: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
+    .action(async (promptArg: string | undefined, o: { batch?: string; draft: boolean; snooze?: string; project: string; model?: string; effort?: string; contextWindow?: string; fast?: boolean; title?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; setupScript: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
       const g = program.opts<GlobalOpts>();
       if (o.batch !== undefined) {
         const clash = [promptArg !== undefined && "a prompt argument", o.stdin && "--stdin", o.title && "-t", o.branch && "--branch", o.wait && "--wait"].filter(Boolean);
@@ -177,13 +176,13 @@ export function registerThreads(program: Command) {
         const items = parseBatch(readFileSync(o.batch === "-" ? 0 : o.batch, "utf8"));
         const ctx = await connect(g, { write: true });
         const { title: _t, branch: _b, ...base } = o;
-        const created = await createThreads(ctx, g, base, items, { force: o.force });
+        const created = await createThreads(ctx, g, base, items);
         emit(ctx.format, created, () => renderTable(created.map((c) => ({ id: c.threadId, title: c.title, model: `${c.modelSelection.model}${effortOf(c.modelSelection) ? "@" + effortOf(c.modelSelection) : ""}`, env: c.env, branch: c.branch ?? "" })), ["id", "title", "model", "env", "branch"]));
         return;
       }
       const ctx = await connect(g, { write: true });
       const text = o.draft ? (promptArg ?? "") : readPrompt(promptArg, o);
-      const summary = await createThread(ctx, g, { ...o, text }, { guard: !o.force });
+      const summary = await createThread(ctx, g, { ...o, text }, { guard: true });
       const { threadId, modelSelection, snoozedUntil, project, title } = summary;
       if (!o.wait || o.draft) {
         emit(ctx.format, summary, () => `created ${threadId}${o.draft ? " (draft, no turn started)" : ""}\nproject  ${project}\ntitle    ${title}\nmodel    ${modelSelection.instanceId}/${modelSelection.model}${effortOf(modelSelection) ? "@" + effortOf(modelSelection) : ""}\nenv      ${summary.env}${summary.env === "worktree" ? ` (${summary.branch} from ${summary.baseBranch})` : ""}${snoozedUntil ? `\nsnoozed  until ${snoozedUntil}` : ""}`);
