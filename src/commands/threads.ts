@@ -1,6 +1,6 @@
-import type { Command } from "commander";
+import { Option, type Command } from "commander";
 import { readFileSync } from "node:fs";
-import { connect, withAuthRetry, type GlobalOpts } from "../context.js";
+import { connect, withAuthRetry, type Ctx, type GlobalOpts } from "../context.js";
 import { api, dispatch, HttpError, type ShellProject, type ShellThread } from "../http.js";
 import { ago, emit, renderTable, short } from "../output.js";
 import { RpcSocket } from "../ws.js";
@@ -8,29 +8,37 @@ import { nowIso, uuid } from "../ids.js";
 import { createThread, createThreads, parseBatch, startTurn, matchThread, matchProject, effortOf, RUNTIME_MODES, INTERACTION_MODES, type RuntimeMode, type InteractionMode } from "../ops.js";
 import { parseWhen } from "../time.js";
 import { threadStatus, waitForIdle } from "../wait.js";
-import { MAX_BATCH } from "../guard.js";
+import { MAX_BATCH, MIN_BATCH } from "../guard.js";
 import { derivePendingApprovals, derivePendingUserInputs, type Activity } from "../pending.js";
 
 const APPROVAL_DECISIONS = ["accept", "acceptForSession", "acceptAlways", "decline"] as const;
 
-async function loadThreads(ctx: { server: import("../discover.js").Server; client: import("../http.js").Client }, includeArchived: boolean): Promise<{ threads: ShellThread[]; projects: ShellProject[] }> {
-  const shell = await api.shell(ctx.client);
+/** Live shell snapshot, plus archived threads (and projects only they reference) from a separate RPC when asked. */
+async function loadThreads(ctx: Ctx, g: GlobalOpts, includeArchived: boolean): Promise<{ threads: ShellThread[]; projects: ShellProject[] }> {
+  const shell = await withAuthRetry(ctx, g, api.shell);
   if (!includeArchived) return shell;
   const sock = new RpcSocket(ctx.server, ctx.client.token);
   try {
     const archived = await sock.request<{ threads: ShellThread[]; projects: ShellProject[] }>("orchestration.getArchivedShellSnapshot", {});
     const seen = new Set(shell.threads.map((t) => t.id));
-    return { threads: [...shell.threads, ...archived.threads.filter((t) => !seen.has(t.id))], projects: shell.projects };
+    const seenP = new Set(shell.projects.map((p) => p.id));
+    return {
+      threads: [...shell.threads, ...archived.threads.filter((t) => !seen.has(t.id))],
+      projects: [...shell.projects, ...archived.projects.filter((p) => !seenP.has(p.id))],
+    };
   } finally { sock.close(); }
 }
 
 export { matchThread, matchProject } from "../ops.js";
 
+/** `-` (or the `--stdin` alias) reads the prompt from stdin. */
 function readPrompt(arg: string | undefined, o: { stdin?: boolean }): string {
   if (o.stdin || arg === "-") return readFileSync(0, "utf8").trim();
-  if (!arg) throw new Error("missing prompt (pass as argument, or --stdin)");
+  if (!arg) throw new Error("missing prompt (pass it as an argument, or - to read stdin)");
   return arg;
 }
+const PROMPT_ARG = "prompt text, or - to read it from stdin";
+const STDIN_ALIAS = "same as passing - as the prompt";
 
 function shellPoller(client: import("../http.js").Client, threadId: string) {
   return async () => (await api.shell(client)).threads.find((t) => t.id === threadId);
@@ -50,19 +58,8 @@ export function registerThreads(program: Command) {
     .action(async (o: { project?: string; status?: string; all: boolean; limit: number; ids?: string }) => {
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g);
-      const shell = await withAuthRetry(ctx, g, api.shell);
       if (o.ids) o.all = true;
-      if (o.all) {
-        // Archived threads are served by a separate RPC, not the live shell snapshot.
-        const sock = new RpcSocket(ctx.server, ctx.client.token);
-        try {
-          const archived = await sock.request<{ threads: ShellThread[]; projects: ShellProject[] }>("orchestration.getArchivedShellSnapshot", {});
-          const seen = new Set(shell.threads.map((t) => t.id));
-          shell.threads.push(...archived.threads.filter((t) => !seen.has(t.id)));
-          const seenP = new Set(shell.projects.map((p) => p.id));
-          shell.projects.push(...archived.projects.filter((p) => !seenP.has(p.id)));
-        } finally { sock.close(); }
-      }
+      const shell = await loadThreads(ctx, g, o.all);
       const byProject = new Map(shell.projects.map((p) => [p.id, p]));
       let list = shell.threads.map((t) => ({ ...t, status: threadStatus(t), projectTitle: byProject.get(t.projectId)?.title ?? "" }));
       if (o.ids) {
@@ -84,11 +81,13 @@ export function registerThreads(program: Command) {
   threads
     .command("show <ref>")
     .description("Show a thread with its recent messages")
-    .option("-t, --turns <n>", "number of turns to fetch", (v) => Number(v), 5)
-    .action(async (ref: string, o: { turns: number }) => {
+    .option("-n, --turns <n>", "number of turns to fetch", (v) => Number(v), 5)
+    .addOption(new Option("-t <n>", "deprecated alias of -n").argParser((v) => Number(v)).hideHelp())
+    .action(async (ref: string, o: { turns: number; t?: number }) => {
+      if (o.t !== undefined) o.turns = o.t;
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g);
-      const shell = await loadThreads(ctx, true);
+      const shell = await loadThreads(ctx, g, true);
       const t = matchThread(shell.threads, ref);
       // Archived threads have no live detail endpoint (404); fall back to the archived shell row.
       const detail = await api.thread(ctx.client, t.id, o.turns).catch((e: unknown) => {
@@ -135,7 +134,7 @@ export function registerThreads(program: Command) {
 
   threads
     .command("wait <ref>")
-    .description("Block until the thread's current turn finishes or it needs a human. Exit 0 idle, 2 needs-human, 3 error, 4 timeout.")
+    .description("Block until the thread's current turn finishes or it needs a human. Exit 0 idle, 2 needs-human, 3 error, 4 timeout, 5 aborted.")
     .option("--timeout <seconds>", "give up after N seconds", (v) => Number(v), 1800)
     .option("--require-turn", "wait for a turn to start even if the thread is idle now", false)
     .action(async (ref: string, o: { timeout: number; requireTurn: boolean }) => {
@@ -148,8 +147,9 @@ export function registerThreads(program: Command) {
     });
 
   threads
-    .command("new [prompt]")
-    .description(`Create a thread in a project and send the first message. Prints the new thread id. Refuses (exit 6) when a very similar thread was just created in the project or too many were created recently; --batch creates up to ${MAX_BATCH} at once.`)
+    .command("new")
+    .argument("[prompt]", PROMPT_ARG)
+    .description(`Create a thread in a project and send the first message. Prints the new thread id. Refuses (exit 6) when a very similar thread was just created in the project or too many were created recently; --batch creates ${MIN_BATCH}-${MAX_BATCH} related threads at once.`)
     .requiredOption("-p, --project <ref>", "project id/prefix/title/workspaceRoot")
     .option("-m, --model <ref>", "model slug or alias, optionally instanceId/slug (default: project default → server default)")
     .option("-e, --effort <level>", "reasoning effort (low|medium|high|xhigh|max|…, validated per model)")
@@ -162,12 +162,12 @@ export function registerThreads(program: Command) {
     .option("--runtime-mode <mode>", `${RUNTIME_MODES.join("|")} (default: config defaults.runtimeMode, else auto)`)
     .option("--interaction-mode <mode>", `${INTERACTION_MODES.join("|")} (default: config defaults.interactionMode, else default)`)
     .option("--no-setup-script", "skip the project setup script in the new worktree")
-    .option("--stdin", "read prompt from stdin", false)
+    .option("--stdin", STDIN_ALIAS, false)
     .option("--wait", "wait for the first turn to finish and print the result", false)
     .option("--timeout <seconds>", "with --wait", (v) => Number(v), 1800)
     .option("--draft", "create the thread without sending a message (no agent turn starts)", false)
     .option("--snooze <when>", "hide the thread from the sidebar until <when> (ISO, 30m/2h/3d, HH:MM, \"tomorrow 09:00\"). Visibility only: a started turn keeps running.")
-    .option("--batch <file>", `create up to ${MAX_BATCH} threads: JSON array of prompts or {prompt,title?,model?,effort?,branch?} ('-' = stdin). Other flags apply to all. Skips the duplicate check, not the rate limit.`)
+    .option("--batch <file>", `create ${MIN_BATCH}-${MAX_BATCH} threads: JSON array of prompts or {prompt,title?,model?,effort?,branch?} ('-' = stdin). Other flags apply to all. Skips the duplicate check against recent threads, not the rate limit.`)
     .action(async (promptArg: string | undefined, o: { batch?: string; draft: boolean; snooze?: string; project: string; model?: string; effort?: string; contextWindow?: string; fast?: boolean; title?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; setupScript: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
       const g = program.opts<GlobalOpts>();
       if (o.batch !== undefined) {
@@ -175,13 +175,13 @@ export function registerThreads(program: Command) {
         if (clash.length) throw new Error(`--batch cannot be combined with ${clash.join(", ")} (set title/branch per item; wait with \`threads wait <id>\`)`);
         const items = parseBatch(readFileSync(o.batch === "-" ? 0 : o.batch, "utf8"));
         const ctx = await connect(g, { write: true });
-        const { title: _t, branch: _b, ...base } = o;
+        const base = { project: o.project, model: o.model, effort: o.effort, contextWindow: o.contextWindow, fast: o.fast, env: o.env, base: o.base, runtimeMode: o.runtimeMode, interactionMode: o.interactionMode, setupScript: o.setupScript, draft: o.draft, snooze: o.snooze };
         const created = await createThreads(ctx, g, base, items);
         emit(ctx.format, created, () => renderTable(created.map((c) => ({ id: c.threadId, title: c.title, model: `${c.modelSelection.model}${effortOf(c.modelSelection) ? "@" + effortOf(c.modelSelection) : ""}`, env: c.env, branch: c.branch ?? "" })), ["id", "title", "model", "env", "branch"]));
         return;
       }
       const ctx = await connect(g, { write: true });
-      const text = o.draft ? (promptArg ?? "") : readPrompt(promptArg, o);
+      const text = o.draft && promptArg === undefined && !o.stdin ? "" : readPrompt(promptArg, o);
       const summary = await createThread(ctx, g, { ...o, text }, { guard: true });
       const { threadId, modelSelection, snoozedUntil, project, title } = summary;
       if (!o.wait || o.draft) {
@@ -194,13 +194,14 @@ export function registerThreads(program: Command) {
     });
 
   threads
-    .command("send <ref> [prompt]")
+    .command("send <ref>")
+    .argument("[prompt]", PROMPT_ARG)
     .description("Send a follow-up message to an existing thread (starts a turn)")
     .option("-m, --model <ref>", "override model for this turn")
     .option("-e, --effort <level>", "override effort for this turn")
     .option("--runtime-mode <mode>", RUNTIME_MODES.join("|"))
     .option("--interaction-mode <mode>", INTERACTION_MODES.join("|"))
-    .option("--stdin", "read prompt from stdin", false)
+    .option("--stdin", STDIN_ALIAS, false)
     .option("--wait", "wait for the turn to finish", false)
     .option("--timeout <seconds>", "with --wait", (v) => Number(v), 1800)
     .action(async (ref: string, promptArg: string | undefined, o: { model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; stdin: boolean; wait: boolean; timeout: number }) => {
@@ -256,11 +257,13 @@ export function registerThreads(program: Command) {
 
   threads
     .command("respond <ref>")
-    .description("Answer a pending user-input request. Use -a <questionId>=<option label> per question, or --json '{...}'.")
+    .description("Answer a pending user-input request. Use --answer <questionId>=<option label> per question, or --json '{...}'.")
     .option("-r, --request <id>", "specific requestId (default: oldest pending)")
-    .option("-a, --answer <kv...>", "questionId=answer (repeatable; comma-separate for multi-select)")
+    .option("--answer <kv...>", "questionId=answer (repeatable; comma-separate for multi-select)")
+    .addOption(new Option("-a <kv...>", "deprecated alias of --answer").hideHelp())
     .option("--json <answers>", "raw answers object keyed by question id")
-    .action(async (ref: string, o: { request?: string; answer?: string[]; json?: string }) => {
+    .action(async (ref: string, o: { request?: string; answer?: string[]; a?: string[]; json?: string }) => {
+      o.answer = [...(o.answer ?? []), ...(o.a ?? [])];
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g, { write: true });
       const shell = await withAuthRetry(ctx, g, api.shell);
@@ -353,7 +356,7 @@ export function registerThreads(program: Command) {
       .action(async (ref: string) => {
         const g = program.opts<GlobalOpts>();
         const ctx = await connect(g, { write: true });
-        const shell = await loadThreads(ctx, name === "unarchive");
+        const shell = await loadThreads(ctx, g, name === "unarchive");
         const t = matchThread(shell.threads, ref);
         const res = await dispatch(ctx.client, { type, commandId: uuid(), threadId: t.id });
         emit(ctx.format, { threadId: t.id, sequence: res.sequence }, () => `${name}d ${t.id}`);

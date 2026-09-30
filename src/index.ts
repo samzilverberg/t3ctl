@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from "commander";
+import { Command, CommanderError } from "commander";
 import { readFileSync } from "node:fs";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
@@ -19,7 +19,9 @@ const program = new Command()
   .option("--origin <url>", "server origin (default: discover; env T3CTL_ORIGIN)")
   .option("-f, --format <fmt>", "json|table (default: table on TTY, json otherwise / T3CTL_AGENT=1)")
   .option("--no-auto-pair", "fail instead of re-pairing automatically when the stored token is missing/expired/insufficient")
-  .showHelpAfterError();
+  .showHelpAfterError()
+  // Throw instead of exiting on usage errors so they get the same JSON error shape (inherited by subcommands).
+  .exitOverride();
 
 registerEnv(program);
 registerAuth(program);
@@ -28,11 +30,19 @@ registerThreads(program);
 registerModels(program);
 registerSchedule(program);
 
+/**
+ * Every failure: message on stderr, exit code ≥ 1, and in JSON mode `{"error": {code, message, ...details}}` on
+ * stdout. `code` is the CliError code, `usage` for commander parse errors, `error` for anything unclassified.
+ */
 program.parseAsync(process.argv).catch((err: unknown) => {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (err instanceof CliError && pickFormat(program.opts<{ format?: string }>().format) === "json") {
-    process.stdout.write(JSON.stringify({ error: { code: err.code, message: msg, ...err.details } }, null, 2) + "\n");
+  if (err instanceof CommanderError && err.exitCode === 0) process.exit(0); // --help / --version
+  const usage = err instanceof CommanderError;
+  const msg = usage ? err.message.replace(/^error: /, "") : err instanceof Error ? err.message : String(err);
+  const code = err instanceof CliError ? err.code : usage ? "usage" : "error";
+  if (pickFormat(program.opts<{ format?: string }>().format) === "json") {
+    const details = err instanceof CliError ? err.details : usage ? { commanderCode: err.code } : {};
+    process.stdout.write(JSON.stringify({ error: Object.assign({ code, message: msg }, details, { code, message: msg }) }, null, 2) + "\n");
   }
-  process.stderr.write(`t3ctl: ${msg}\n`);
-  process.exit(err instanceof CliError ? err.exitCode : 1);
+  if (!usage) process.stderr.write(`t3ctl: ${msg}\n`); // commander already printed usage errors
+  process.exit(err instanceof CliError ? err.exitCode : usage ? err.exitCode || 1 : 1);
 });

@@ -31,7 +31,8 @@ export interface Job {
   nextAt: string | null;
   graceSec: number;
   /** New thread per occurrence … */
-  new?: { project: string; text: string; model?: string; effort?: string; title?: string; env?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode };
+  /** `project` is the resolved id (older jobs may hold the ref as typed); `projectTitle` is for display only. */
+  new?: { project: string; projectTitle?: string; text: string; model?: string; effort?: string; title?: string; env?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode };
   /** … or a follow-up turn on an existing thread. */
   send?: { thread: string; text: string; model?: string; effort?: string };
   runs: Run[];

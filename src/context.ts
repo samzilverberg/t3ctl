@@ -27,6 +27,7 @@ export async function withAuthRetry<T>(ctx: Ctx, opts: GlobalOpts, fn: (c: Clien
     return await fn(ctx.client);
   } catch (e) {
     if (!(e instanceof HttpError) || e.status !== 401 || opts.noAutoPair) throw e;
+    if (process.env.T3CTL_TOKEN) throw new Error("server rejected T3CTL_TOKEN (401); unset it to use the stored session, or mint a new token");
     process.stderr.write("t3ctl: server rejected stored token (401); re-pairing…\n");
     const cfg = readConfig();
     const res = await pair(ctx.server, { label: cfg.label, operate: (cfg.scopes ?? []).includes("orchestration:operate") });

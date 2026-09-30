@@ -63,7 +63,7 @@ docs/research       protocol notes from the upstream source
 `pnpm test` runs `node --test` through tsx against fixtures in `test/fixtures/` (provider catalog, a scrubbed
 shell snapshot, activity logs with an approval and a user-input request). Pure logic is covered: `time`,
 `schedule` (grace/overlap/occurrence rules), `models` (alias + fuzzy resolution, option validation), `pending`,
-`threadStatus`, `matchThread`/`matchProject`. Nothing in `test/` talks to a server.
+`threadStatus`, `matchThread`/`matchProject`, the guard and batch parsing. Nothing in `test/` talks to a real server.
 
 When the server changes shape, re-record: unarchive one thread that had an approval and one that had an
 AskUserQuestion, then `pnpm record-fixtures <approvalRef> <userInputRef>`, re-archive them, and check the diff
@@ -76,7 +76,7 @@ command wiring (flags, error JSON, exit codes), not as a protocol reference.
 
 ## Validating live
 
-There is no mock server; validate against the real app. Cheap, safe pattern used so far:
+The fake server only covers wiring; validate against the real app. Cheap, safe pattern used so far:
 
 ```sh
 export T3CTL_AGENT=1                      # JSON output

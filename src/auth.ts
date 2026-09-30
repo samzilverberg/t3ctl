@@ -89,6 +89,8 @@ export async function pair(server: Server, opts: { label?: string; operate: bool
  * retry once via `repairOn401` when the server rejects a token we believed valid (revoked in UI).
  */
 export async function ensureToken(server: Server, needScopes: string[] = READ_SCOPES, opts: { autoPair?: boolean } = {}): Promise<string> {
+  // An explicit token is taken as-is: its scopes/expiry are not in config.json, and the server has the final say (401/403).
+  if (process.env.T3CTL_TOKEN) return process.env.T3CTL_TOKEN;
   const cfg = readConfig();
   const stored = keychainGet(accountKey(server));
   const have = new Set(cfg.scopes ?? []);

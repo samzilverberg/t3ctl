@@ -3,15 +3,16 @@
  * starting its first turn) and start a follow-up turn on an existing thread.
  */
 import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 import { withAuthRetry, type Ctx, type GlobalOpts } from "./context.js";
 import { api, dispatch, type ShellProject, type ShellThread } from "./http.js";
-import { buildModelSelection, fetchProviders, fetchServerSettings, resolveModel, type ModelSelection } from "./models.js";
+import { buildModelSelection, fetchConfig, fetchProviders, resolveModel, type ModelSelection, type ServerConfig } from "./models.js";
 import { nowIso, tempBranchName, uuid } from "./ids.js";
 import { readConfig } from "./config.js";
 import { parseWhen } from "./time.js";
 import { threadStatus } from "./wait.js";
 import { short } from "./output.js";
-import { checkRate, enforceGuard, guardConfig, MAX_BATCH } from "./guard.js";
+import { checkRate, enforceGuard, guardConfig, MAX_BATCH, MIN_BATCH, normalize } from "./guard.js";
 import { CliError } from "./errors.js";
 
 export const RUNTIME_MODES = ["approval-required", "auto-accept-edits", "auto", "full-access"] as const;
@@ -45,12 +46,14 @@ export interface NewThreadSummary {
 
 export function matchThread(threads: ShellThread[], ref: string): ShellThread {
   const t = threads.find((x) => x.id === ref) ?? threads.find((x) => x.id.startsWith(ref)) ?? threads.find((x) => x.title === ref);
-  if (!t) throw new Error(`thread not found: ${ref}`);
+  if (!t) throw new CliError("thread_not_found", `thread not found: ${ref}`, { ref });
   return t;
 }
+/** id, id prefix, exact title, or workspace root (absolute, or relative to cwd such as `.`). */
 export function matchProject(projects: ShellProject[], ref: string): ShellProject {
-  const p = projects.find((x) => x.id === ref) ?? projects.find((x) => x.id.startsWith(ref)) ?? projects.find((x) => x.title === ref) ?? projects.find((x) => x.workspaceRoot === ref);
-  if (!p) throw new Error(`project not found: ${ref}. Known: ${projects.map((x) => x.title).join(", ")}`);
+  const p = projects.find((x) => x.id === ref) ?? projects.find((x) => x.id.startsWith(ref)) ?? projects.find((x) => x.title === ref)
+    ?? projects.find((x) => x.workspaceRoot === ref) ?? projects.find((x) => x.workspaceRoot === resolve(ref));
+  if (!p) throw new CliError("project_not_found", `project not found: ${ref}. Known: ${projects.map((x) => x.title).join(", ")}`, { ref, known: projects.map((x) => x.title) });
   return p;
 }
 
@@ -63,14 +66,14 @@ export function applyDefaults<T extends Pick<NewThreadOpts, "runtimeMode" | "int
   const d = readConfig().defaults ?? {};
   const runtimeMode = o.runtimeMode ?? (d.runtimeMode as RuntimeMode | undefined) ?? "auto";
   const interactionMode = o.interactionMode ?? (d.interactionMode as InteractionMode | undefined) ?? "default";
-  if (!RUNTIME_MODES.includes(runtimeMode)) throw new Error(`invalid --runtime-mode. Allowed: ${RUNTIME_MODES.join(", ")}`);
-  if (!INTERACTION_MODES.includes(interactionMode)) throw new Error(`invalid --interaction-mode. Allowed: ${INTERACTION_MODES.join(", ")}`);
+  if (!RUNTIME_MODES.includes(runtimeMode)) throw new CliError("invalid_option", `invalid --runtime-mode. Allowed: ${RUNTIME_MODES.join(", ")}`, { option: "runtimeMode", allowed: RUNTIME_MODES });
+  if (!INTERACTION_MODES.includes(interactionMode)) throw new CliError("invalid_option", `invalid --interaction-mode. Allowed: ${INTERACTION_MODES.join(", ")}`, { option: "interactionMode", allowed: INTERACTION_MODES });
   return { ...o, runtimeMode, interactionMode, model: o.model ?? d.model, effort: o.effort ?? d.effort, env: o.env ?? d.env };
 }
 
 /** Resolve the model selection for a new thread: explicit flags → project default → server default. */
-export async function resolveNewModel(ctx: Ctx, project: ShellProject, o: Pick<NewThreadOpts, "model" | "effort" | "contextWindow" | "fast">): Promise<{ modelSelection: ModelSelection; settings: Record<string, unknown> }> {
-  const [providers, settings] = await Promise.all([fetchProviders(ctx.server, ctx.client.token), fetchServerSettings(ctx.server, ctx.client.token)]);
+export async function resolveNewModel(ctx: Ctx, project: ShellProject, o: Pick<NewThreadOpts, "model" | "effort" | "contextWindow" | "fast">, config?: ServerConfig): Promise<{ modelSelection: ModelSelection; settings: Record<string, unknown> }> {
+  const { providers, settings } = config ?? await fetchConfig(ctx.server, ctx.client.token);
   const fallback = (project.defaultModelSelection as ModelSelection | undefined) ?? (settings.textGenerationModelSelection as ModelSelection | undefined);
   if (o.model || o.effort || o.contextWindow || o.fast !== undefined) {
     const ref = o.model ?? (fallback ? `${fallback.instanceId}/${fallback.model}` : undefined);
@@ -93,9 +96,10 @@ export async function resolveNewModel(ctx: Ctx, project: ShellProject, o: Pick<N
 
 /**
  * Create a thread; unless `draft`, also start its first turn with `text`. `guard` runs the duplicate / rate-limit
- * check (src/guard.ts) first; `threads new` enables it, the scheduler does not.
+ * check (src/guard.ts) first; `threads new` enables it, the scheduler does not. `config` reuses an already fetched
+ * `server.getConfig` (batch).
  */
-export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts, { guard = false } = {}): Promise<NewThreadSummary> {
+export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts, { guard = false, config }: { guard?: boolean; config?: ServerConfig } = {}): Promise<NewThreadSummary> {
   const o = applyDefaults(input);
   const { runtimeMode, interactionMode } = o;
   const draft = o.draft === true;
@@ -107,10 +111,10 @@ export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts
   const project = matchProject(shell.projects, o.project);
   const title = (o.title ?? text.split("\n")[0]).trim().slice(0, 80) || "Untitled";
   if (guard) await enforceGuard(ctx.client, shell.threads, project, { title, text });
-  const { modelSelection, settings } = await resolveNewModel(ctx, project, o);
+  const { modelSelection, settings } = await resolveNewModel(ctx, project, o, config);
 
   const envMode = (o.env ?? (settings.defaultThreadEnvMode as string | undefined) ?? "worktree").toLowerCase();
-  if (envMode !== "worktree" && envMode !== "local") throw new Error("--env must be worktree|local");
+  if (envMode !== "worktree" && envMode !== "local") throw new CliError("invalid_option", "--env must be worktree|local", { option: "env", allowed: ["worktree", "local"] });
   const currentBranch = gitCurrentBranch(project.workspaceRoot);
   const useWorktree = envMode === "worktree" && Boolean(currentBranch) && currentBranch !== "HEAD";
   const baseBranch = o.base ?? currentBranch;
@@ -144,7 +148,7 @@ export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts
   }
   return {
     threadId, projectId: project.id, project: project.title, title, modelSelection, runtimeMode, interactionMode,
-    env: useWorktree ? "worktree" : (draft ? "local (draft)" : "local"), branch: useWorktree ? worktreeBranch : (currentBranch ?? null),
+    env: useWorktree ? "worktree" : "local", branch: useWorktree ? worktreeBranch : (currentBranch ?? null),
     baseBranch: useWorktree ? (baseBranch ?? null) : null, draft, snoozedUntil: snoozedUntil ?? null, sequence: res.sequence, url: `${ctx.server.origin}/thread/${threadId}`,
   };
 }
@@ -158,7 +162,7 @@ export function parseBatch(raw: string): BatchItem[] {
   let v: unknown;
   try { v = JSON.parse(raw); } catch (e) { throw new Error(`--batch: invalid JSON (${(e as Error).message})`); }
   if (!Array.isArray(v)) throw new Error("--batch: expected a JSON array of prompt strings or {prompt, title?, model?, effort?, branch?} objects");
-  if (v.length === 0 || v.length > MAX_BATCH) throw new Error(`--batch: 1..${MAX_BATCH} threads per call (got ${v.length})`);
+  checkBatchSize(v.length);
   return v.map((x, i): BatchItem => {
     if (typeof x === "string") return { text: x };
     if (!x || typeof x !== "object" || Array.isArray(x)) throw new Error(`--batch[${i}]: expected a string or an object`);
@@ -172,25 +176,45 @@ export function parseBatch(raw: string): BatchItem[] {
   });
 }
 
+/** A batch is 2..MAX_BATCH threads: one thread is a plain `threads new` (and goes through the duplicate check). */
+function checkBatchSize(n: number): void {
+  if (n < MIN_BATCH || n > MAX_BATCH) throw new CliError("invalid_batch", `--batch: ${MIN_BATCH}..${MAX_BATCH} threads per call (got ${n}); for one thread use plain \`threads new\``, { count: n, min: MIN_BATCH, max: MAX_BATCH });
+}
+
 /**
- * Create up to MAX_BATCH threads in one call, sequentially. Skips the duplicate check by intent (the caller asked
- * for several related threads) but still applies the rate limit for the whole batch.
+ * Create 2..MAX_BATCH threads in one call, sequentially. Skips the duplicate check against recent threads by
+ * intent (the caller asked for several related threads) but rejects items that repeat each other verbatim, and
+ * still applies the rate limit for the whole batch. Every item's model/effort is validated before anything is
+ * created, so a typo cannot leave half a batch behind.
  */
 export async function createThreads(ctx: Ctx, g: GlobalOpts, base: Omit<NewThreadOpts, "text" | "title" | "branch">, items: BatchItem[]): Promise<NewThreadSummary[]> {
-  if (items.length === 0 || items.length > MAX_BATCH) throw new Error(`--batch: 1..${MAX_BATCH} threads per call (got ${items.length})`);
+  checkBatchSize(items.length);
+  const bad = (i: number, msg: string) => new CliError("invalid_batch", `--batch[${i}]: ${msg}`, { index: i });
+  const seen = new Map<string, number>();
   items.forEach((it, i) => {
-    if (!base.draft && !it.text.trim()) throw new Error(`--batch[${i}]: missing prompt`);
-    if (base.draft && !it.text.trim() && !it.title) throw new Error(`--batch[${i}]: --draft needs a title or prompt`);
+    if (!base.draft && !it.text.trim()) throw bad(i, "missing prompt");
+    if (base.draft && !it.text.trim() && !it.title) throw bad(i, "--draft needs a title or prompt");
+    const key = normalize(it.text) || `title:${normalize(it.title ?? "")}`;
+    if (seen.has(key)) throw bad(i, `same ${it.text.trim() ? "prompt" : "title"} as item ${seen.get(key)}`);
+    seen.set(key, i);
   });
   const branches = items.map((it) => it.branch).filter(Boolean);
-  if (new Set(branches).size !== branches.length) throw new Error("--batch: branch names must be unique");
+  if (new Set(branches).size !== branches.length) throw new CliError("invalid_batch", "--batch: branch names must be unique");
   const shell = await withAuthRetry(ctx, g, api.shell);
   const project = matchProject(shell.projects, base.project);
   checkRate(shell.threads, project.id, project.title, items.length, new Date(), guardConfig());
+  const config = await fetchConfig(ctx.server, ctx.client.token);
+  const inputs = items.map((it): NewThreadOpts => ({ ...base, text: it.text, title: it.title, branch: it.branch, model: it.model ?? base.model, effort: it.effort ?? base.effort }));
+  for (const [i, input] of inputs.entries()) {
+    try { await resolveNewModel(ctx, project, applyDefaults(input), config); } catch (e) {
+      if (e instanceof CliError) throw new CliError(e.code, `--batch[${i}]: ${e.message}`, { ...e.details, index: i });
+      throw bad(i, e instanceof Error ? e.message : String(e));
+    }
+  }
   const created: NewThreadSummary[] = [];
-  for (const [i, it] of items.entries()) {
+  for (const [i, input] of inputs.entries()) {
     try {
-      created.push(await createThread(ctx, g, { ...base, text: it.text, title: it.title, branch: it.branch, model: it.model ?? base.model, effort: it.effort ?? base.effort }));
+      created.push(await createThread(ctx, g, input, { config }));
     } catch (e) {
       if (created.length === 0) throw e;
       const cause = e instanceof Error ? e.message : String(e);

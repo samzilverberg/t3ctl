@@ -6,7 +6,8 @@
  *    is at least `similarity` alike (Dice coefficient over character trigrams of the normalized text)
  *  - rate limit: `rateMax` threads already created in the project within `rateWindowSec`
  * Best effort by design: two calls racing inside the same second can both pass. There is no per-call override:
- * callers wait (`retryAfterSec`) or use `--batch`. The scheduler never runs the guard. Thresholds are tunable via
+ * callers check the reported thread first, then wait (`retryAfterSec`) or use `--batch` (2+ threads). Templated
+ * prompts that differ in one identifier ("PR #123" / "PR #124") also count as alike: that is the accepted cost. The scheduler never runs the guard. Thresholds are tunable via
  * config.json `guard`.
  */
 import { readConfig } from "./config.js";
@@ -25,7 +26,8 @@ export interface GuardConfig {
 }
 
 export const GUARD_DEFAULTS: GuardConfig = { windowSec: 60, similarity: 0.8, rateMax: 5, rateWindowSec: 60 };
-/** Upper bound on threads per `threads new --batch` call. Not configurable. */
+/** Bounds on threads per `threads new --batch` call. Not configurable. One thread is a plain `threads new`. */
+export const MIN_BATCH = 2;
 export const MAX_BATCH = 5;
 /** Exit code for a create refused by the guard (duplicate or rate limit). */
 export const GUARD_EXIT = 6;
@@ -88,8 +90,8 @@ export function duplicateError(project: string, d: DuplicateMatch, cfg: GuardCon
   return new CliError(
     "duplicate_thread",
     `a very similar thread ${short(d.threadId)} "${d.title}" was created ${d.secondsAgo}s ago in project ${project} ` +
-      `(${d.matchedOn} ${Math.round(d.similarity * 100)}% alike). Check whether you already created a thread for this task. ` +
-      `If a second one is really wanted, retry in ${retryAfterSec}s (or use --batch for several related threads at once).`,
+      `(${d.matchedOn} ${Math.round(d.similarity * 100)}% alike). First check that thread: it is probably this task, already started. ` +
+      `If it is a different task, create the related threads together with --batch, or retry in ${retryAfterSec}s.`,
     { project, duplicate: d, retryAfterSec },
     GUARD_EXIT,
   );
@@ -106,8 +108,8 @@ export function checkRate(threads: ShellThread[], projectId: string, project: st
   const retryAfterSec = oldest ? Math.max(1, Math.ceil(cfg.rateWindowSec - ageSec(oldest, now))) : null;
   throw new CliError(
     "rate_limited",
-    `${recent.length} thread(s) were already created in project ${project} in the last ${cfg.rateWindowSec}s ` +
-      `(limit ${cfg.rateMax}${n > 1 ? `, this call adds ${n}` : ""}). Check that you are not creating threads in a loop` +
+    `${recent.length} thread(s) were already created in project ${project} in the last ${cfg.rateWindowSec}s, by anyone ` +
+      `(this CLI, the app, the scheduler; limit ${cfg.rateMax}${n > 1 ? `, this call adds ${n}` : ""}). Check that you are not creating threads in a loop` +
       `${retryAfterSec ? `; retry in ${retryAfterSec}s` : ""}.`,
     {
       project, limit: { max: cfg.rateMax, windowSec: cfg.rateWindowSec }, requested: n, retryAfterSec,

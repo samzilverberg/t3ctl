@@ -23,6 +23,6 @@ pair them by convention rather than code:
 - **Model / effort choice**: per-task fields (`t3-model: sonnet`, `t3-effort: low`) or a policy in your agent
   instructions, e.g. small chores → `sonnet@low`, code changes → `opus@high`, research/design → `fable@xhigh`.
   Absent → project default.
-- **Progress**: `t3ctl threads -i <ids>` for a batch status report, `threads show <id> -t 1` for the latest
+- **Progress**: `t3ctl threads -i <ids>` for a batch status report, `threads show <id> -n 1` for the latest
   assistant message, `threads wait <id>` (exit code) for blocking flows, `threads -s needs-approval` for a
   "needs me" view. `schedule add` covers deferred and recurring tasks without any tracker.

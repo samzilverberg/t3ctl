@@ -32,5 +32,7 @@ test("matchProject: id, prefix, title, workspaceRoot; error lists known titles",
   assert.equal(matchProject(shell.projects, p.id).id, p.id);
   assert.equal(matchProject(shell.projects, p.title).id, p.id);
   assert.equal(matchProject(shell.projects, p.workspaceRoot).id, p.id);
+  assert.equal(matchProject(shell.projects, `${p.workspaceRoot}/`).id, p.id);             // resolved like a path
+  assert.equal(matchProject(shell.projects, `${p.workspaceRoot}/sub/..`).id, p.id);
   assert.throws(() => matchProject(shell.projects, "zzz"), /project not found: zzz\. Known: project-0/);
 });

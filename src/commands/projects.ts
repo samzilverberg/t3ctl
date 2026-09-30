@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { connect, type GlobalOpts } from "../context.js";
 import { api, dispatch } from "../http.js";
 import { resolve } from "node:path";
+import { matchProject } from "../ops.js";
 import { existsSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import { withAuthRetry } from "../context.js";
@@ -26,13 +27,12 @@ export function registerProjects(program: Command) {
     });
 
   projects
-    .command("show <idOrTitle>")
-    .description("Show one project (full JSON)")
+    .command("show <ref>")
+    .description("Show one project (full JSON). <ref> = id, id prefix, title, or workspace root (e.g. .)")
     .action(async (ref: string) => {
       const { client, format } = await connect(program.opts<GlobalOpts>());
       const shell = await api.shell(client);
-      const p = shell.projects.find((x) => x.id === ref || x.id.startsWith(ref) || x.title === ref);
-      if (!p) throw new Error(`project not found: ${ref}`);
+      const p = matchProject(shell.projects, ref);
       emit(format, p, () => JSON.stringify(p, null, 2));
     });
 
@@ -70,8 +70,7 @@ export function registerProjects(program: Command) {
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g, { write: true });
       const shell = await withAuthRetry(ctx, g, api.shell);
-      const p = shell.projects.find((x) => x.id === ref || x.id.startsWith(ref) || x.title === ref || x.workspaceRoot === resolve(ref));
-      if (!p) throw new Error(`project not found: ${ref}`);
+      const p = matchProject(shell.projects, ref);
       const n = shell.threads.filter((t) => t.projectId === p.id).length;
       if (n > 0 && !o.force) throw new Error(`project ${p.title} has ${n} active thread(s); pass --force to delete anyway`);
       const res = await dispatch(ctx.client, { type: "project.delete", commandId: uuid(), projectId: p.id, ...(o.force ? { force: true } : {}) });

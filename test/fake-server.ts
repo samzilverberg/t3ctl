@@ -21,6 +21,8 @@ export interface Fake {
   threads: ShellThread[];
   messages: Map<string, Array<{ role: string; text: string }>>;
   commands: Array<Record<string, unknown>>;
+  /** Make the n-th dispatch from now (1-based) fail with an RPC Failure. */
+  failDispatch?: number;
   ctx: Ctx;
   /** Add an existing thread created `secondsAgo` ago with `prompt` as its first user message. */
   seed(title: string, prompt: string | undefined, secondsAgo: number): ShellThread;
@@ -58,7 +60,12 @@ export async function startFake(): Promise<Fake> {
       if (f._tag !== "Request") return;
       const ok = (value: unknown) => ws.send(JSON.stringify({ _tag: "Exit", requestId: f.id, exit: { _tag: "Success", value } }));
       if (f.tag === "server.getConfig") return ok({ providers, settings: { defaultThreadEnvMode: "local" } });
+      if (f.tag === "orchestration.getArchivedShellSnapshot") return ok({ projects: [], threads: [] });
       if (f.tag === "orchestration.dispatchCommand") {
+        if (fake.failDispatch !== undefined && --fake.failDispatch === 0) {
+          fake.failDispatch = undefined;
+          return ws.send(JSON.stringify({ _tag: "Exit", requestId: f.id, exit: { _tag: "Failure", cause: { _tag: "Fail", error: "boom" } } }));
+        }
         const cmd = f.payload ?? {};
         commands.push(cmd);
         const create = (cmd.type === "thread.create" ? cmd : (cmd.bootstrap as { createThread?: Record<string, unknown> } | undefined)?.createThread) as Record<string, unknown> | undefined;
@@ -76,7 +83,7 @@ export async function startFake(): Promise<Fake> {
   const origin = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
   const server = { origin, descriptor: { environmentId: "fake-env", label: "fake", platform: { os: "darwin", arch: "arm64" }, serverVersion: "0.0.0", capabilities: {} }, source: "env" as const, isDesktopBackend: true, degraded: false };
 
-  return {
+  const fake: Fake = {
     origin, project, threads, messages, commands,
     ctx: { server, client: makeClient(server, "fake-token"), format: "json" },
     seed(title, prompt, secondsAgo) {
@@ -87,12 +94,16 @@ export async function startFake(): Promise<Fake> {
     },
     close: () => new Promise<void>((r) => { for (const c of wss.clients) c.terminate(); wss.close(); http.close(() => r()); }),
   };
+  return fake;
 }
 
-/** Run the real CLI (via tsx) against `origin` with an operate-scoped token; resolves with exit code + output. */
-export function runCli(origin: string, args: string[], stdin?: string): Promise<{ code: number; stdout: string; stderr: string }> {
+/**
+ * Run the real CLI (via tsx) against `origin` with `T3CTL_TOKEN` and a fresh config dir (no stored scopes: the env
+ * token must be used as-is, never trigger a pairing). `config` seeds config.json.
+ */
+export function runCli(origin: string, args: string[], stdin?: string, config: Record<string, unknown> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
   const configDir = mkdtempSync(join(tmpdir(), "t3ctl-cfg-"));
-  writeFileSync(join(configDir, "config.json"), JSON.stringify({ scopes: ["orchestration:read", "orchestration:operate"] }));
+  writeFileSync(join(configDir, "config.json"), JSON.stringify(config));
   const entry = new URL("../src/index.ts", import.meta.url).pathname;
   return new Promise((resolve) => {
     const child = execFile(process.execPath, ["--import", "tsx", entry, "--origin", origin, "-f", "json", ...args], {

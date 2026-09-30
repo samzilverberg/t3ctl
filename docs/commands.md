@@ -14,20 +14,20 @@ t3ctl projects remove <ref> [--force]
 
 t3ctl threads [list] [-p project] [-s status] [-a] [-n N]
 t3ctl threads -i <id,id,…>                                   # status report for known ids
-t3ctl threads show <ref> [-t turns]
+t3ctl threads show <ref> [-n turns]
 t3ctl threads search <query>
 t3ctl threads watch <ref> [--timeout s]                      # raw NDJSON event stream
 t3ctl threads wait <ref> [--timeout s] [--require-turn]      # exit 0 idle · 2 needs-human · 3 error · 4 timeout
 t3ctl threads new  -p <project> [-m model] [-e effort] [--context-window 1m] [--fast]
                    [-t title] [--env worktree|local] [--base br] [--branch br]
                    [--runtime-mode …] [--interaction-mode default|plan] [--no-setup-script]
-                   [--wait] [--stdin] "<prompt>"
-t3ctl threads new -p <project> [shared flags] --batch <file|->   # up to 5 threads in one call
+                   [--wait] "<prompt>" | -                   # - reads the prompt from stdin
+t3ctl threads new -p <project> [shared flags] --batch <file|->   # 2-5 related threads in one call
 t3ctl threads new … --draft [--snooze <when>]                # create without starting a turn
 t3ctl threads send <ref> [-m model] [-e effort] [--wait] "<prompt>"
 t3ctl threads pending <ref>                                  # open approval / user-input requests
 t3ctl threads approve <ref> [-d accept|acceptForSession|acceptAlways|decline] [-r requestId]
-t3ctl threads respond <ref> -a <questionId>=<answer> … | --json '{…}'
+t3ctl threads respond <ref> --answer <questionId>=<answer> … | --json '{…}'
 t3ctl threads snooze <ref> -u <when> | unsnooze <ref>        # sidebar visibility only
 t3ctl threads settle|unsettle <ref>
 t3ctl threads interrupt|archive|unarchive <ref>
@@ -47,10 +47,27 @@ For `schedule add` it may also be a cron expression; see [scheduler.md](schedule
 
 `threads wait` (and `new --wait` / `send --wait`): `0` idle, `2` needs a human (approval or question), `3` turn
 errored, `4` timeout, `5` aborted. `threads new` refused by the duplicate / rate-limit guard: `6`. Everything
-else: `0` success, `1` error (message on stderr).
+else: `0` success, `1` error.
 
-In JSON mode, actionable errors (`duplicate_thread`, `rate_limited`, `batch_partial`) are also printed to stdout
-as `{"error": {"code", "message", …details}}`; the message still goes to stderr.
+## Errors
+
+Every failure prints its message on stderr. In JSON mode (`-f json`, non-TTY, `T3CTL_AGENT=1`) it is also
+printed on stdout as `{"error": {"code", "message", …details}}`:
+
+| `code` | exit | details |
+|---|---|---|
+| `duplicate_thread` | 6 | `project`, `duplicate {threadId,title,createdAt,secondsAgo,similarity,matchedOn}`, `retryAfterSec` |
+| `rate_limited` | 6 | `project`, `limit {max,windowSec}`, `requested`, `retryAfterSec`, `recent[]` |
+| `batch_partial` | 1 | `created[]` (summaries), `failedIndex`, `cause` |
+| `invalid_batch` | 1 | `index` when an item is at fault |
+| `thread_not_found` / `project_not_found` | 1 | `ref` (`known` titles for projects) |
+| `model_unknown` / `invalid_option` | 1 | `ref` / `option`, `allowed` (plus `index` inside a batch) |
+| `no_server` | 1 | `origin` or `probed` |
+| `usage` | 1 | `commanderCode` (bad or missing flag/argument; commander prints usage on stderr) |
+| `error` | 1 | anything unclassified |
+
+Prompt arguments (`threads new`, `threads send`, `schedule add`) accept `-` to read stdin; `--stdin` is kept as an
+alias on `new` and `send`.
 
 ## Thread status values
 
@@ -76,7 +93,11 @@ already has in the target project and refuses with exit `6` when:
 
 - **`duplicate_thread`**: a thread created in the last `windowSec` (60) has a first prompt at least `similarity`
   (0.8) alike (Dice over character trigrams, case and punctuation ignored). Drafts compare titles instead.
-- **`rate_limited`**: `rateMax` (5) threads were already created in the project in the last `rateWindowSec` (60).
+- **`rate_limited`**: `rateMax` (5) threads were already created in the project in the last `rateWindowSec` (60),
+  by anyone (t3ctl, the app, the scheduler).
+
+Distinct tasks written from one template ("Review PR #123" / "Review PR #124") also count as alike. That is the
+accepted cost of a cheap text check: create such threads together with `--batch`, or wait.
 
 ```json
 {"error": {"code": "duplicate_thread", "message": "a very similar thread c910869f \"Fix CJS build\" was created 11s ago …",
@@ -87,9 +108,9 @@ already has in the target project and refuses with exit `6` when:
   "recent": [{"threadId": "…", "title": "…", "createdAt": "…", "secondsAgo": 12}]}}
 ```
 
-There is no per-call override: wait `retryAfterSec` (the duplicate check only looks back `windowSec`), or use
-`--batch` when several related threads are wanted. It is best effort, not a lock: two calls racing within the same second can both
-pass. The happy path costs nothing extra (the shell snapshot is fetched anyway; only threads inside the window
+There is no per-call override: check the reported thread first (usually it is this task, already started), then
+use `--batch` for several related threads or wait `retryAfterSec`. It is best effort, not a lock: two calls
+racing within the same second can both pass. The happy path costs nothing extra (the shell snapshot is fetched anyway; only threads inside the window
 get their first prompt fetched). The scheduler does not use the guard.
 
 Tune or disable in `~/.config/t3ctl/config.json` (`windowSec: 0` turns the duplicate check off, `rateMax: 0` the
@@ -116,10 +137,12 @@ JSON
 `--batch <file>` (`-` = stdin) takes a JSON array of prompt strings or objects with `prompt` plus optional `title`,
 `model`, `effort`, `branch`. Every other flag (`-p`, `-m`, `-e`, `--env`, `--runtime-mode`, `--draft`, `--snooze`,
 …) applies to all items. Not allowed with a prompt argument, `--stdin`, `-t`, `--branch` or `--wait` (wait per id
-with `threads wait`). Capped at 5 items. The duplicate check is skipped (the items are meant to be related); the
-rate limit still counts the whole batch. Threads are created in order; if one fails, the error
-is `batch_partial` with `created` (summaries so far), `failedIndex` and `cause`. Output: an array of the usual
-`threads new` summaries.
+with `threads wait`). 2 to 5 items: a single thread is a plain `threads new`, so a one-item batch cannot be used to
+skip the duplicate check. The check against recent threads is skipped (the items are meant to be related), but
+items that repeat each other verbatim are rejected, and the rate limit still counts the whole batch. Every item's
+model and effort are validated before anything is created. Threads are then created in order; if one fails, the
+error is `batch_partial` (exit 1) with `created` (summaries so far), `failedIndex` and `cause`. Output: an array of
+the usual `threads new` summaries.
 
 ---
 

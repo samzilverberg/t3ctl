@@ -14,7 +14,8 @@ export function registerSchedule(program: Command) {
   const sched = program.command("schedule").description("Start threads (or send follow-ups) later or on a cron; needs `schedule install` once");
 
   sched
-    .command("add <when> <prompt>")
+    .command("add <when>")
+    .argument("<prompt>", "prompt text, or - to read it from stdin")
     .description("Schedule a new thread (-p) or a follow-up on an existing thread (--thread). <when> = one-shot (30m, 2h, HH:MM, \"tomorrow 09:00\", ISO) or cron (\"0 9 * * 1-5\", @hourly, @daily, @weekly)")
     .option("-p, --project <ref>", "project for a new thread per occurrence")
     .option("--thread <ref>", "instead of a new thread, send <prompt> to this thread each occurrence")
@@ -34,7 +35,7 @@ export function registerSchedule(program: Command) {
       // Validate targets now so a typo does not surface at 03:00.
       const ctx = await connect(g);
       const shell = await withAuthRetry(ctx, g, api.shell);
-      if (o.project) matchProject(shell.projects, o.project);
+      const project = o.project ? matchProject(shell.projects, o.project) : undefined;
       if (o.thread) matchThread(shell.threads, o.thread);
       if (o.model) resolveModel(await fetchProviders(ctx.server, ctx.client.token), o.model);
       if (o.project) applyDefaults({ model: o.model, effort: o.effort, env: o.env });
@@ -42,7 +43,7 @@ export function registerSchedule(program: Command) {
       const job: Job = {
         id: newJobId(), createdAt: nowIso(), cron: s.cron, nextAt: s.nextAt, graceSec, runs: [],
         ...(o.project
-          ? { new: { project: o.project, text, model: o.model, effort: o.effort, title: o.title, env: o.env } }
+          ? { new: { project: project!.id, projectTitle: project!.title, text, model: o.model, effort: o.effort, title: o.title, env: o.env } }
           : { send: { thread: matchThread(shell.threads, o.thread!).id, text, model: o.model, effort: o.effort } }),
       };
       const store = readStore(); store.jobs.push(job); writeStore(store);
@@ -66,7 +67,7 @@ export function registerSchedule(program: Command) {
           const last = j.runs.at(-1);
           return {
             id: j.id, when: describeWhen(j), next: j.nextAt ?? "-", grace: `${Math.round(j.graceSec / 60)}m`,
-            target: j.new ? `new @${j.new.project}${j.new.model ? ` ${j.new.model}${j.new.effort ? "@" + j.new.effort : ""}` : ""}` : `send ${short(j.send!.thread)}`,
+            target: j.new ? `new @${j.new.projectTitle ?? j.new.project}${j.new.model ? ` ${j.new.model}${j.new.effort ? "@" + j.new.effort : ""}` : ""}` : `send ${short(j.send!.thread)}`,
             prompt: (j.new?.text ?? j.send?.text ?? "").split("\n")[0].slice(0, 40),
             last: last ? `${last.status}${last.threadId ? " " + short(last.threadId) : ""}${last.reason ? " (" + last.reason + ")" : ""}` : "",
           };

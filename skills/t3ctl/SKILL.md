@@ -24,7 +24,7 @@ Only if it prints "t3 auth pairing create failed" should you tell the user to ch
 | Models + allowed efforts | `t3ctl models` → `[{instanceId,model,aliases,effort:"low|medium|high*|…"}]` |
 | Active threads | `t3ctl threads` → `[{id,title,status,projectTitle,branch,worktreePath,modelSelection,updatedAt}]` |
 | Filter | `t3ctl threads -p mono -s running`; `-a` includes archived |
-| Thread + last N turns | `t3ctl threads show <ref> -t 2` → `{status, thread:{messages:[{role,text,createdAt}]}}` |
+| Thread + last N turns | `t3ctl threads show <ref> -n 2` → `{status, thread:{messages:[{role,text,createdAt}]}}` |
 | Find by content | `t3ctl threads search "<words>"` → `[{threadId,source,snippet}]` |
 
 `status`: `running`, `idle`, `needs-approval`, `needs-input`, `error`, `interrupted`, `archived`, `new`.
@@ -40,7 +40,7 @@ Only if it prints "t3 auth pairing create failed" should you tell the user to ch
 | Block on a running thread | `t3ctl threads wait <ref> --timeout 1800` (exit 0 idle · 2 needs-human · 3 error · 4 timeout) |
 | What is it blocked on | `t3ctl threads pending <ref>` → `{approvals:[{requestId,requestKind,detail,options}], userInputs:[{requestId,questions:[{id,question,options:[{label}]}]}]}` |
 | Approve / decline | `t3ctl threads approve <ref> -d accept` (or `decline`, `acceptForSession`, `acceptAlways`; `-r <requestId>` to pick one) |
-| Answer questions | `t3ctl threads respond <ref> -a <questionId>=<option label> …` |
+| Answer questions | `t3ctl threads respond <ref> --answer <questionId>=<option label> …` |
 | Hide until later (visibility only) | `t3ctl threads snooze <ref> -u "tomorrow 09:00"` / `t3ctl threads unsnooze <ref>` |
 | Several threads at once (2-5) | `t3ctl threads new -p <project> -m <model> -e <effort> --batch - <<< '["<prompt 1>", {"prompt": "<prompt 2>", "title": "<title>"}]'` → `[{threadId,…}, …]` |
 | Create without starting | `t3ctl threads new -p <project> --draft -t "<title>" [--snooze 2h]` |
@@ -50,7 +50,10 @@ Only if it prints "t3 auth pairing create failed" should you tell the user to ch
 | Scheduled follow-up | `t3ctl schedule add "<when>" --thread <ref> "<prompt>"` |
 | See / cancel schedules | `t3ctl schedule` (pending jobs, last run, ticker status) · `t3ctl schedule remove <id>` |
 
-Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high --stdin`.
+Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high -`  (`-` = read the prompt from stdin).
+
+Errors: any failure exits non-zero and prints `{"error":{"code","message",…}}` on stdout (e.g. `thread_not_found`,
+`project_not_found`, `model_unknown`, `invalid_option`, `usage`). Read `code`, not the text.
 
 ## Choosing project, model, effort
 
@@ -72,15 +75,16 @@ Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high
 - Each `threads new` (without `--draft`) starts a paid agent turn. One thread per task; use `send` for follow-ups.
 - `threads new` exits 6 with `{"error":{"code":"duplicate_thread","duplicate":{threadId,title,secondsAgo}}}` when a
   very similar thread was just created in the project. That usually means you (or a repeated user message) already
-  started this task: check that thread (`threads show <threadId> -t 1`) and use it. Only if a second thread is
-  really wanted, retry after `retryAfterSec`. `rate_limited` (also exit 6) means 5+ threads were created in the project in the
+  started this task: check that thread (`threads show <threadId> -n 1`) and use it. Only if a second thread is
+  really wanted and the task is different, create the related threads together with `--batch` (2-5 items), or
+  retry after `retryAfterSec`. Prompts from one template ("PR #123" / "PR #124") also count as alike. `rate_limited` (also exit 6) means 5+ threads were created in the project in the
   last minute: stop and check for a loop. Need several threads for one request? Use one `--batch` call.
 - Snooze hides a thread; it does not delay or schedule work. To run a task later use `schedule add`. The thread id
   only exists after the job fires: read it from `t3ctl schedule -a` (`runs[].threadId`).
 - Scheduler rules are fixed: one fire per occurrence, missed occurrences dropped, late fires skipped after the grace
   window (60m or half the cron interval), recurring jobs skip while the previous run's thread is running or waiting
   on a human. If `tickerInstalled` is false, tell the user to run `t3ctl schedule install`.
-- Omitting `-m` uses the config default (`opus` = Opus 4.8), then the project default.
+- Omitting `-m` uses config `defaults.model` if set, else the project default, else the server default.
 
 ## Optional: driving t3ctl from a task tracker
 
@@ -92,6 +96,6 @@ planner, an issue tracker), the pairing is a convention you keep in that tool:
 - Delegate: `t3ctl threads new -p <project> -m <model> -e <effort> -t "<task title>" "<prompt incl. task
   reference + deliverable>"`, then record the id and `t3-status: running` right away.
 - Sync loop: `t3ctl threads -i id1,id2,…` for all tracked ids → surface `needs-human` first, then `idle`
-  (`t3ctl threads show <id> -t 1`), then `running`; update status fields.
+  (`t3ctl threads show <id> -n 1`), then `running`; update status fields.
 - Close: mark the task done, `t3ctl threads archive <id>`. Archive only threads the tracker references.
 - Reverse lookup when an id was lost: `t3ctl threads search "<task title>"`.

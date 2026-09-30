@@ -14,7 +14,7 @@ export function registerAuth(program: Command) {
     .command("pair")
     .description("Mint a pairing token via the installed `t3` CLI, exchange it for a bearer session, store it in the macOS Keychain")
     .option("--label <label>", "connection label shown in T3 Code → Connections", `t3ctl@${hostname()}`)
-    .option("--operate", "also request orchestration:operate (needed for future write commands). Default is read-only.", false)
+    .option("--operate", "also request orchestration:operate (write commands). Default is read-only; write commands upgrade automatically.", false)
     .action(async (o: { label: string; operate: boolean }) => {
       const g = program.opts<GlobalOpts>();
       const server = await discoverServer(g.origin);

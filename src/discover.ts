@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { T3_HOME, readConfig } from "./config.js";
+import { CliError } from "./errors.js";
 
 export interface EnvironmentDescriptor {
   environmentId: string;
@@ -96,7 +97,7 @@ export async function discoverServer(explicitOrigin?: string, deps: Partial<Disc
   if (env) {
     const origin = trim(env);
     const descriptor = await d.probe(origin, 3000);
-    if (!descriptor) throw new Error(`No T3 Code server at ${origin}`);
+    if (!descriptor) throw new CliError("no_server", `No T3 Code server at ${origin}`, { origin });
     return toServer(origin, descriptor, "env");
   }
   const candidates = new Map<string, Server["source"]>();
@@ -131,7 +132,7 @@ export async function discoverServer(explicitOrigin?: string, deps: Partial<Disc
   }
 
   if (found.length === 0) {
-    throw new Error(`No running T3 Code server found (probed ${[...candidates.keys()].join(", ")}). Start the T3 Code app, or pass --origin.`);
+    throw new CliError("no_server", `No running T3 Code server found (probed ${[...candidates.keys()].join(", ")}). Start the T3 Code app, or pass --origin.`, { probed: [...candidates.keys()] });
   }
   const fallback = found[0];
   d.warn(`t3ctl: no desktop backend found; using ${fallback.origin} (${String(fallback.descriptor.capabilities.serverSelfUpdate)}). The desktop UI will not show live updates.\n`);

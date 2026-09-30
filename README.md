@@ -21,7 +21,7 @@ t3ctl env               # finds the running app; first write command pairs autom
 
 ```sh
 t3ctl threads                                      # what is running / idle / waiting on you
-t3ctl threads show <ref> -t 1                      # latest exchange
+t3ctl threads show <ref> -n 1                      # latest exchange
 t3ctl threads new -p myrepo -m opus -e high "Fix the flaky login test"   # refuses near-duplicates
 t3ctl threads new -p myrepo --batch tasks.json     # 2-5 threads in one call
 t3ctl threads wait <ref>                           # exit 0 idle · 2 needs you · 3 error · 4 timeout

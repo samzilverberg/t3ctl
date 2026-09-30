@@ -18,7 +18,8 @@ export function parseWhen(input: string, now = new Date()): string {
     if (clock[1] === "tomorrow" || (!clock[1] && d.getTime() <= now.getTime())) d.setDate(d.getDate() + 1);
     return d.toISOString();
   }
-  const t = Date.parse(input);
+  // Only date-shaped strings: Date.parse("90") is 1990, not "90 minutes".
+  const t = /^\d{4}-\d{2}-\d{2}/.test(s) ? Date.parse(input) : NaN;
   if (!Number.isNaN(t)) return new Date(t).toISOString();
   throw new Error(`cannot parse time "${input}" (use ISO, 30m/2h/3d/1w, HH:MM, or "tomorrow [HH:MM]")`);
 }

@@ -4,6 +4,12 @@ import { parseWhen } from "../src/time.js";
 
 const now = new Date("2026-09-10T10:00:00.000Z");
 
+test("bare numbers are not dates (Date.parse would read them as years)", () => {
+  for (const s of ["90", "5", "2026"]) assert.throws(() => parseWhen(s, now), /cannot parse time/);
+  assert.equal(parseWhen("2026-09-11T08:00:00Z", now), "2026-09-11T08:00:00.000Z");
+  assert.ok(parseWhen("2026-09-11", now).startsWith("2026-09-11"));
+});
+
 test("relative durations", () => {
   assert.equal(parseWhen("30m", now), "2026-09-10T10:30:00.000Z");
   assert.equal(parseWhen("2h", now), "2026-09-10T12:00:00.000Z");
