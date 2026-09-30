@@ -8,15 +8,23 @@ hardcodes the current `node` and `dist/index.js` paths, so re-run `install` if e
 ```
 t3ctl schedule add "tomorrow 09:00" -p mono -m opus -e high -t "Nightly triage" "Triage open issues…"
 t3ctl schedule add "0 9 * * 1-5" -p mono "Weekday morning: …"        # cron → recurring, new thread each time
+t3ctl schedule add "0 0 * * *" --utc -p mono "Nightly auto-tasks"   # fires at 00:00 UTC year-round (no DST drift)
 t3ctl schedule add @hourly --thread <ref> "Check the board and report"  # recurring follow-up into one thread
-t3ctl schedule                                                         # pending jobs + ticker status
+t3ctl schedule                                                         # pending jobs + ticker status (with tz column)
 t3ctl schedule remove <id>
 ```
 
 `<when>` is either a one-shot (`30m`, `2h`, `HH:MM`, `"tomorrow 09:00"`, ISO) or a cron expression (5 fields,
-or `@hourly` / `@daily` / `@weekly`; local time zone). Targets and model refs are validated when you `add`.
+or `@hourly` / `@daily` / `@weekly`). Targets and model refs are validated when you `add`.
 
-Fixed rules, no knobs beyond `--grace`:
+**Timezone.** A cron `<when>` is interpreted in the host's **local** time zone by default, so a job like `0 0 * * *`
+drifts against UTC as local DST changes. Pin it to a fixed zone with `--tz <IANA>` (e.g. `--tz Asia/Jerusalem`) or
+`--utc` (shorthand for `--tz UTC`); the next-fire time is then recomputed in that zone every tick, correctly across
+DST boundaries. The tz is stored per job and shown in `schedule list` (`local` when unset). It applies to cron only
+— a one-shot fires at a single fixed instant, so `--tz` on a one-shot is rejected. Existing jobs (no tz) keep
+firing in local time.
+
+Fixed rules, no knobs beyond `--grace` and the timezone:
 
 - **At most one fire per occurrence, never replayed.** Missed occurrences (Mac asleep, logged out) are dropped;
   only the most recent due one is considered when the ticker next runs.

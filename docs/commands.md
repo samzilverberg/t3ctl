@@ -32,7 +32,7 @@ t3ctl threads snooze <ref> -u <when> | unsnooze <ref>        # sidebar visibilit
 t3ctl threads settle|unsettle <ref>
 t3ctl threads interrupt|archive|unarchive <ref>
 
-t3ctl schedule add <when> -p <project> [-m model] [-e effort] [-t title] [--env …] [--grace 30m] "<prompt>"
+t3ctl schedule add <when> -p <project> [-m model] [-e effort] [-t title] [--env …] [--tz UTC|--utc] [--grace 30m] "<prompt>"
 t3ctl schedule add <when> --thread <ref> [-m model] [-e effort] "<prompt>"
 t3ctl schedule [list] [-a] | remove <id> | tick | install | uninstall
 ```
@@ -41,7 +41,8 @@ Global flags: `--origin <url>` (skip discovery; also `T3CTL_ORIGIN`), `-f json|t
 `T3CTL_TOKEN` overrides the Keychain. `T3CTL_CONFIG_DIR` relocates `~/.config/t3ctl`.
 
 `<when>` = ISO, `30m`/`2h`/`3d`/`1w`, `HH:MM` (today, else tomorrow), or `"tomorrow [HH:MM]"` (default 09:00).
-For `schedule add` it may also be a cron expression; see [scheduler.md](scheduler.md).
+For `schedule add` it may also be a cron expression, interpreted in the host's local tz unless `--tz <IANA>` /
+`--utc` pins it to a fixed zone; see [scheduler.md](scheduler.md).
 
 ## Exit codes
 

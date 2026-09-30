@@ -28,6 +28,8 @@ export interface Job {
   createdAt: string;
   /** Cron expression for recurring jobs; absent for one-shots. */
   cron?: string;
+  /** IANA timezone the cron expression is interpreted in (e.g. "UTC"). Absent = host local tz. */
+  tz?: string;
   /** Next scheduled occurrence (ISO). null when a one-shot has fired/skipped. */
   nextAt: string | null;
   graceSec: number;
@@ -68,19 +70,30 @@ function isCron(s: string): boolean {
   return t.startsWith("@") || t.split(/\s+/).length >= 5;
 }
 
-function cronOf(expr: string): Cron {
-  try { return new Cron(expr); } catch (e) { throw new Error(`invalid cron "${expr}": ${(e as Error).message}`); }
+function cronOf(expr: string, tz?: string): Cron {
+  try { return new Cron(expr, tz ? { timezone: tz } : {}); } catch (e) { throw new Error(`invalid cron "${expr}": ${(e as Error).message}`); }
 }
 
-/** Interpret `<when>`: cron / @daily → recurring; otherwise a one-shot via parseWhen. */
-export function parseSchedule(when: string, now = new Date()): { cron?: string; nextAt: string; defaultGraceSec: number } {
+/** Throw if `tz` is not a resolvable IANA zone. croner defers the check to nextRun(), so force one. */
+export function validateTz(tz: string): void {
+  try { new Cron("0 0 * * *", { timezone: tz }).nextRun(new Date()); }
+  catch { throw new Error(`unknown timezone "${tz}" (use an IANA name like UTC or Asia/Jerusalem)`); }
+}
+
+/**
+ * Interpret `<when>`: cron / @daily → recurring; otherwise a one-shot via parseWhen. `tz` (IANA) pins a cron
+ * job to a fixed zone so it fires at the same wall-clock time across DST; it only applies to cron schedules.
+ */
+export function parseSchedule(when: string, now = new Date(), tz?: string): { cron?: string; nextAt: string; defaultGraceSec: number } {
   if (isCron(when)) {
-    const c = cronOf(when);
+    if (tz) validateTz(tz);
+    const c = cronOf(when, tz);
     const n1 = c.nextRun(now); const n2 = n1 ? c.nextRun(n1) : null;
     if (!n1) throw new Error(`cron "${when}" never fires`);
     const intervalSec = n2 ? (n2.getTime() - n1.getTime()) / 1000 : 3600;
     return { cron: when.trim(), nextAt: n1.toISOString(), defaultGraceSec: Math.max(60, Math.min(3600, Math.floor(intervalSec / 2))) };
   }
+  if (tz) throw new Error("--tz / --utc only applies to cron schedules (a one-shot fires at a fixed instant)");
   const nextAt = parseWhen(when, now);
   if (Date.parse(nextAt) <= now.getTime()) throw new Error(`"${when}" is in the past`);
   return { nextAt, defaultGraceSec: 3600 };
@@ -95,7 +108,7 @@ export function evaluate(job: Job, now = new Date()): { due: false } | { due: tr
   let next = new Date(job.nextAt);
   if (next.getTime() > now.getTime()) return { due: false };
   if (!job.cron) return { due: true, at: job.nextAt, late: now.getTime() - next.getTime() > job.graceSec * 1000, missed: 0, nextAt: null };
-  const c = cronOf(job.cron);
+  const c = cronOf(job.cron, job.tz);
   let last = next; let missed = -1;
   while (next.getTime() <= now.getTime()) { last = next; missed++; const n = c.nextRun(next); if (!n) break; next = n; }
   const following = next.getTime() > now.getTime() ? next.toISOString() : null;

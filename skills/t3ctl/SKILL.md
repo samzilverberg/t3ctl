@@ -47,7 +47,7 @@ error, never "the first one". Prefer full ids in anything you write down.
 | Create without starting | `t3ctl threads new -p <project> --draft -t "<title>" [--snooze 2h]` |
 | Done for now / tidy | `t3ctl threads settle <ref>` (keeps it, leaves inbox), `t3ctl threads archive <ref>`, `t3ctl threads interrupt <ref>` |
 | Register a repo | `t3ctl projects add <path> [-m model -e effort]` |
-| Run later / on a cron | `t3ctl schedule add "<when>" -p <project> [-m model -e effort -t title] "<prompt>"` → `{id, nextAt, tickerInstalled}`; `<when>` = `30m`, `"tomorrow 09:00"`, ISO, or cron (`"0 9 * * 1-5"`, `@daily`) |
+| Run later / on a cron | `t3ctl schedule add "<when>" -p <project> [-m model -e effort -t title] "<prompt>"` → `{id, nextAt, tickerInstalled}`; `<when>` = `30m`, `"tomorrow 09:00"`, ISO, or cron (`"0 9 * * 1-5"`, `@daily`). Cron is local tz; add `--utc` (or `--tz <IANA>`) to pin a fixed zone, e.g. fire at 00:00 UTC year-round despite DST |
 | Scheduled follow-up | `t3ctl schedule add "<when>" --thread <ref> "<prompt>"` |
 | See / cancel schedules | `t3ctl schedule` (pending jobs, last run, ticker status) · `t3ctl schedule remove <id>` |
 

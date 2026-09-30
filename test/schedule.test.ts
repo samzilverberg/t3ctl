@@ -33,6 +33,38 @@ test("parseSchedule: cron → recurring with grace = min(60m, interval/2)", () =
   assert.throws(() => parseSchedule("61 * * * *", now), /invalid cron/);
 });
 
+test("parseSchedule: cron in a fixed tz pins the UTC instant across DST", () => {
+  // Asia/Jerusalem is UTC+2 in winter, UTC+3 in summer; UTC has no DST.
+  const winter = new Date("2026-01-15T05:00:00.000Z");
+  const summer = new Date("2026-07-15T05:00:00.000Z");
+  const utcWinter = parseSchedule("0 0 * * *", winter, "UTC");
+  const utcSummer = parseSchedule("0 0 * * *", summer, "UTC");
+  assert.equal(utcWinter.cron, "0 0 * * *");
+  assert.equal(utcWinter.nextAt, "2026-01-16T00:00:00.000Z");   // 00:00 UTC year-round
+  assert.equal(utcSummer.nextAt, "2026-07-16T00:00:00.000Z");
+  // A local (Jerusalem) job drifts by an hour between winter and summer.
+  const jerWinter = parseSchedule("0 0 * * *", winter, "Asia/Jerusalem");
+  const jerSummer = parseSchedule("0 0 * * *", summer, "Asia/Jerusalem");
+  assert.equal(jerWinter.nextAt, "2026-01-15T22:00:00.000Z");
+  assert.equal(jerSummer.nextAt, "2026-07-15T21:00:00.000Z");
+});
+
+test("parseSchedule: tz is rejected for one-shots and unknown zones", () => {
+  assert.throws(() => parseSchedule("2h", now, "UTC"), /only applies to cron/);
+  assert.throws(() => parseSchedule("0 0 * * *", now, "Not/AZone"), /unknown timezone/);
+});
+
+test("evaluate: recurring honors the job's tz across a DST boundary", () => {
+  // UTC job armed for 00:00 UTC, ticker reaches it at 00:00:20; next stays at 00:00 UTC regardless of season.
+  const ev = evaluate(job({ cron: "0 0 * * *", tz: "UTC", graceSec: 3600, nextAt: "2026-07-16T00:00:00.000Z" }), new Date("2026-07-16T00:00:20.000Z"));
+  assert.deepEqual(ev, { due: true, at: "2026-07-16T00:00:00.000Z", late: false, missed: 0, nextAt: "2026-07-17T00:00:00.000Z" });
+});
+
+test("evaluate: a hand-edited invalid tz throws (the tick guards against this per-job)", () => {
+  // add validates tz, but schedule.json is hand-editable; evaluate must surface the bad zone loudly.
+  assert.throws(() => evaluate(job({ cron: "0 0 * * *", tz: "Not/AZone", nextAt: "2026-09-10T09:00:00.000Z" }), now), /Not\/AZone|timezone/i);
+});
+
 test("evaluate: not due", () => {
   assert.deepEqual(evaluate(job({ nextAt: "2026-09-10T10:00:01.000Z" }), now), { due: false });
   assert.deepEqual(evaluate(job({ nextAt: null }), now), { due: false });
