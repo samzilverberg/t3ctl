@@ -27,7 +27,9 @@ start a T3 server. README.md holds the user docs and protocol research; this fil
 ```
 src/index.ts        commander program, global flags
 src/commands/*.ts   one file per top-level command group (env, auth, models, projects, threads, schedule)
-src/ops.ts          createThread / startTurn shared by `threads new|send` and the scheduler
+src/ops.ts          createThread / createThreads (--batch) / startTurn shared by `threads new|send` and the scheduler
+src/guard.ts        duplicate + rate-limit guard for `threads new` (thresholds: config.json `guard`)
+src/errors.ts       CliError: code + details, printed as {"error":…} on stdout in JSON mode, custom exit code
 src/discover.ts     find the server (config → server-runtime.json → probe :3773) via /.well-known/t3/environment
 src/auth.ts         pairing, token exchange, auto re-pair (ensureToken)
 src/keychain.ts     macOS `security` wrapper
@@ -68,6 +70,10 @@ AskUserQuestion, then `pnpm record-fixtures <approvalRef> <userInputRef>`, re-ar
 for anything personal before committing (the recorder replaces titles, paths, message text and tool arguments).
 Add a test whenever a live bug is fixed in one of the pure modules.
 
+`test/fake-server.ts` is an in-process stand-in (HTTP + Effect-RPC over `ws`) for the handful of endpoints
+`threads new` needs; `runCli` spawns the real CLI against it with `T3CTL_TOKEN` and a temp config dir. Use it for
+command wiring (flags, error JSON, exit codes), not as a protocol reference.
+
 ## Validating live
 
 There is no mock server; validate against the real app. Cheap, safe pattern used so far:
@@ -88,7 +94,9 @@ path, backdate `nextAt` in `schedule.json`; to test overlap, schedule `* * * * *
 longer than a minute. Remove test jobs afterwards (`schedule remove <id>`).
 
 Approval paths: create with `--runtime-mode approval-required` and a prompt that writes a file under `/tmp`;
-`threads pending` → `threads approve`. Snooze paths: `--draft --snooze 2h` then `unsnooze`. Never test writes
+`threads pending` → `threads approve`. Guard paths: run the same `threads new` twice within a minute (second
+exits 6 `duplicate_thread`), repeat with `--force`, then `--batch -` with 3 items; a sixth create inside the minute
+exits 6 `rate_limited`. Archive everything afterwards. Snooze paths: `--draft --snooze 2h` then `unsnooze`. Never test writes
 against real work threads; never archive or interrupt a thread you did not create.
 
 Server-side failures surface as `EnvironmentInternalError`/`orchestration_dispatch_failed`; trace ids can be

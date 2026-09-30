@@ -11,6 +11,8 @@ import { readConfig } from "./config.js";
 import { parseWhen } from "./time.js";
 import { threadStatus } from "./wait.js";
 import { short } from "./output.js";
+import { checkRate, enforceGuard, guardConfig, MAX_BATCH } from "./guard.js";
+import { CliError } from "./errors.js";
 
 export const RUNTIME_MODES = ["approval-required", "auto-accept-edits", "auto", "full-access"] as const;
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
@@ -89,8 +91,11 @@ export async function resolveNewModel(ctx: Ctx, project: ShellProject, o: Pick<N
   throw new Error("no default model configured; pass --model");
 }
 
-/** Create a thread; unless `draft`, also start its first turn with `text`. */
-export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts): Promise<NewThreadSummary> {
+/**
+ * Create a thread; unless `draft`, also start its first turn with `text`. `guard` runs the duplicate / rate-limit
+ * check (src/guard.ts) first; `threads new` enables it unless --force, the scheduler does not.
+ */
+export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts, { guard = false } = {}): Promise<NewThreadSummary> {
   const o = applyDefaults(input);
   const { runtimeMode, interactionMode } = o;
   const draft = o.draft === true;
@@ -100,6 +105,8 @@ export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts
   const snoozedUntil = o.snooze ? parseWhen(o.snooze) : undefined;
   const shell = await withAuthRetry(ctx, g, api.shell);
   const project = matchProject(shell.projects, o.project);
+  const title = (o.title ?? text.split("\n")[0]).trim().slice(0, 80) || "Untitled";
+  if (guard) await enforceGuard(ctx.client, shell.threads, project, { title, text });
   const { modelSelection, settings } = await resolveNewModel(ctx, project, o);
 
   const envMode = (o.env ?? (settings.defaultThreadEnvMode as string | undefined) ?? "worktree").toLowerCase();
@@ -112,7 +119,6 @@ export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts
 
   const threadId = uuid();
   const createdAt = nowIso();
-  const title = (o.title ?? text.split("\n")[0]).trim().slice(0, 80) || "Untitled";
   const createThreadPayload = { projectId: project.id, title, modelSelection, runtimeMode, interactionMode, branch: useWorktree ? worktreeBranch : (currentBranch ?? null), worktreePath: null, createdAt };
   const command = draft
     ? { type: "thread.create", commandId: uuid(), threadId, ...createThreadPayload }
@@ -141,6 +147,59 @@ export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts
     env: useWorktree ? "worktree" : (draft ? "local (draft)" : "local"), branch: useWorktree ? worktreeBranch : (currentBranch ?? null),
     baseBranch: useWorktree ? (baseBranch ?? null) : null, draft, snoozedUntil: snoozedUntil ?? null, sequence: res.sequence, url: `${ctx.server.origin}/thread/${threadId}`,
   };
+}
+
+/** One entry of `threads new --batch`; everything else comes from the shared flags. */
+export interface BatchItem { text: string; title?: string; model?: string; effort?: string; branch?: string }
+const BATCH_KEYS = ["prompt", "title", "model", "effort", "branch"] as const;
+
+/** Parse `--batch` input: a JSON array of prompt strings or `{prompt, title?, model?, effort?, branch?}` objects. */
+export function parseBatch(raw: string): BatchItem[] {
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch (e) { throw new Error(`--batch: invalid JSON (${(e as Error).message})`); }
+  if (!Array.isArray(v)) throw new Error("--batch: expected a JSON array of prompt strings or {prompt, title?, model?, effort?, branch?} objects");
+  if (v.length === 0 || v.length > MAX_BATCH) throw new Error(`--batch: 1..${MAX_BATCH} threads per call (got ${v.length})`);
+  return v.map((x, i): BatchItem => {
+    if (typeof x === "string") return { text: x };
+    if (!x || typeof x !== "object" || Array.isArray(x)) throw new Error(`--batch[${i}]: expected a string or an object`);
+    const o = x as Record<string, unknown>;
+    const unknown = Object.keys(o).filter((k) => !(BATCH_KEYS as readonly string[]).includes(k));
+    if (unknown.length) throw new Error(`--batch[${i}]: unknown key(s) ${unknown.join(", ")}. Allowed: ${BATCH_KEYS.join(", ")}`);
+    const bad = BATCH_KEYS.filter((k) => o[k] !== undefined && typeof o[k] !== "string");
+    if (bad.length) throw new Error(`--batch[${i}]: ${bad.join(", ")} must be string(s)`);
+    const { prompt, title, model, effort, branch } = o as Record<string, string | undefined>;
+    return { text: prompt ?? "", title, model, effort, branch };
+  });
+}
+
+/**
+ * Create up to MAX_BATCH threads in one call, sequentially. Skips the duplicate check by intent (the caller asked
+ * for several related threads) but still applies the rate limit for the whole batch unless `force`.
+ */
+export async function createThreads(ctx: Ctx, g: GlobalOpts, base: Omit<NewThreadOpts, "text" | "title" | "branch">, items: BatchItem[], { force = false } = {}): Promise<NewThreadSummary[]> {
+  if (items.length === 0 || items.length > MAX_BATCH) throw new Error(`--batch: 1..${MAX_BATCH} threads per call (got ${items.length})`);
+  items.forEach((it, i) => {
+    if (!base.draft && !it.text.trim()) throw new Error(`--batch[${i}]: missing prompt`);
+    if (base.draft && !it.text.trim() && !it.title) throw new Error(`--batch[${i}]: --draft needs a title or prompt`);
+  });
+  const branches = items.map((it) => it.branch).filter(Boolean);
+  if (new Set(branches).size !== branches.length) throw new Error("--batch: branch names must be unique");
+  if (!force) {
+    const shell = await withAuthRetry(ctx, g, api.shell);
+    const project = matchProject(shell.projects, base.project);
+    checkRate(shell.threads, project.id, project.title, items.length, new Date(), guardConfig());
+  }
+  const created: NewThreadSummary[] = [];
+  for (const [i, it] of items.entries()) {
+    try {
+      created.push(await createThread(ctx, g, { ...base, text: it.text, title: it.title, branch: it.branch, model: it.model ?? base.model, effort: it.effort ?? base.effort }));
+    } catch (e) {
+      if (created.length === 0) throw e;
+      const cause = e instanceof Error ? e.message : String(e);
+      throw new CliError("batch_partial", `batch stopped at item ${i}: ${cause}. Already created: ${created.map((c) => short(c.threadId)).join(", ")}`, { created, failedIndex: i, cause });
+    }
+  }
+  return created;
 }
 
 export interface SendOpts { text: string; model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode }

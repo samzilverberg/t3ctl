@@ -22,6 +22,8 @@ export interface Config {
   expiresAt?: string;
   /** Defaults applied by `threads new` when flags are omitted. */
   defaults?: { runtimeMode?: string; interactionMode?: string; model?: string; effort?: string; env?: string };
+  /** `threads new` duplicate / rate-limit guard thresholds (see src/guard.ts for defaults). */
+  guard?: { windowSec?: number; similarity?: number; rateMax?: number; rateWindowSec?: number };
   /** User model aliases (alias → slug or server alias). Merged over BUILTIN_MODEL_ALIASES. */
   modelAliases?: Record<string, string>;
 }

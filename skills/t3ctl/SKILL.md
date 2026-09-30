@@ -42,6 +42,7 @@ Only if it prints "t3 auth pairing create failed" should you tell the user to ch
 | Approve / decline | `t3ctl threads approve <ref> -d accept` (or `decline`, `acceptForSession`, `acceptAlways`; `-r <requestId>` to pick one) |
 | Answer questions | `t3ctl threads respond <ref> -a <questionId>=<option label> …` |
 | Hide until later (visibility only) | `t3ctl threads snooze <ref> -u "tomorrow 09:00"` / `t3ctl threads unsnooze <ref>` |
+| Several threads at once (2-5) | `t3ctl threads new -p <project> -m <model> -e <effort> --batch - <<< '["<prompt 1>", {"prompt": "<prompt 2>", "title": "<title>"}]'` → `[{threadId,…}, …]` |
 | Create without starting | `t3ctl threads new -p <project> --draft -t "<title>" [--snooze 2h]` |
 | Done for now / tidy | `t3ctl threads settle <ref>` (keeps it, leaves inbox), `t3ctl threads archive <ref>`, `t3ctl threads interrupt <ref>` |
 | Register a repo | `t3ctl projects add <path> [-m model -e effort]` |
@@ -69,6 +70,11 @@ Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high
 - Never `interrupt`/`archive` a thread you did not create unless the user names it explicitly.
 - Do not send a message to a `running` thread; `wait` first.
 - Each `threads new` (without `--draft`) starts a paid agent turn. One thread per task; use `send` for follow-ups.
+- `threads new` exits 6 with `{"error":{"code":"duplicate_thread","duplicate":{threadId,title,secondsAgo}}}` when a
+  very similar thread was just created in the project. That usually means you (or a repeated user message) already
+  started this task: check that thread (`threads show <threadId> -t 1`) and use it. Pass `--force` only if you are
+  sure a second thread is wanted. `rate_limited` (also exit 6) means 5+ threads were created in the project in the
+  last minute: stop and check for a loop. Need several threads for one request? Use one `--batch` call.
 - Snooze hides a thread; it does not delay or schedule work. To run a task later use `schedule add`. The thread id
   only exists after the job fires: read it from `t3ctl schedule -a` (`runs[].threadId`).
 - Scheduler rules are fixed: one fire per occurrence, missed occurrences dropped, late fires skipped after the grace

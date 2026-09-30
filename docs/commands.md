@@ -21,7 +21,8 @@ t3ctl threads wait <ref> [--timeout s] [--require-turn]      # exit 0 idle · 2 
 t3ctl threads new  -p <project> [-m model] [-e effort] [--context-window 1m] [--fast]
                    [-t title] [--env worktree|local] [--base br] [--branch br]
                    [--runtime-mode …] [--interaction-mode default|plan] [--no-setup-script]
-                   [--wait] [--stdin] "<prompt>"
+                   [--wait] [--stdin] [--force] "<prompt>"
+t3ctl threads new -p <project> [shared flags] --batch <file|->   # up to 5 threads in one call
 t3ctl threads new … --draft [--snooze <when>]                # create without starting a turn
 t3ctl threads send <ref> [-m model] [-e effort] [--wait] "<prompt>"
 t3ctl threads pending <ref>                                  # open approval / user-input requests
@@ -45,7 +46,11 @@ For `schedule add` it may also be a cron expression; see [scheduler.md](schedule
 ## Exit codes
 
 `threads wait` (and `new --wait` / `send --wait`): `0` idle, `2` needs a human (approval or question), `3` turn
-errored, `4` timeout, `5` aborted. Everything else: `0` success, `1` error (message on stderr).
+errored, `4` timeout, `5` aborted. `threads new` refused by the duplicate / rate-limit guard: `6`. Everything
+else: `0` success, `1` error (message on stderr).
+
+In JSON mode, actionable errors (`duplicate_thread`, `rate_limited`, `batch_partial`) are also printed to stdout
+as `{"error": {"code", "message", …details}}`; the message still goes to stderr.
 
 ## Thread status values
 
@@ -62,6 +67,58 @@ Derived the same way the UI does it: `running`, `idle`, `needs-approval`, `needs
   `t3code/<hex>` like the desktop; `newWorktreesStartFromOrigin` is honoured; setup script runs unless
   `--no-setup-script`. Non-git roots fall back to `local`.
 - **Modes**: `--runtime-mode` (default `auto`, or `defaults.runtimeMode`) and `--interaction-mode default|plan`.
+
+## Duplicate and rate-limit guard
+
+Agents occasionally run the same `threads new` twice within seconds (a double-submitted message, a retry) and
+end up with two threads doing the same paid work. Before creating, `threads new` checks the threads the server
+already has in the target project and refuses with exit `6` when:
+
+- **`duplicate_thread`**: a thread created in the last `windowSec` (60) has a first prompt at least `similarity`
+  (0.8) alike (Dice over character trigrams, case and punctuation ignored). Drafts compare titles instead.
+- **`rate_limited`**: `rateMax` (5) threads were already created in the project in the last `rateWindowSec` (60).
+
+```json
+{"error": {"code": "duplicate_thread", "message": "a very similar thread c910869f \"Fix CJS build\" was created 11s ago …",
+  "project": "dev", "hint": "pass --force to create anyway",
+  "duplicate": {"threadId": "c910869f-…", "title": "Fix CJS build", "createdAt": "…", "secondsAgo": 11, "similarity": 0.91, "matchedOn": "prompt"}}}
+{"error": {"code": "rate_limited", "message": "5 thread(s) were already created in project dev in the last 60s …",
+  "project": "dev", "limit": {"max": 5, "windowSec": 60}, "requested": 1, "retryAfterSec": 48,
+  "recent": [{"threadId": "…", "title": "…", "createdAt": "…", "secondsAgo": 12}], "hint": "pass --force to create anyway"}}
+```
+
+`--force` skips both checks. It is best effort, not a lock: two calls racing within the same second can both
+pass. The happy path costs nothing extra (the shell snapshot is fetched anyway; only threads inside the window
+get their first prompt fetched). The scheduler does not use the guard.
+
+Tune or disable in `~/.config/t3ctl/config.json` (`windowSec: 0` turns the duplicate check off, `rateMax: 0` the
+rate limit):
+
+```json
+{ "guard": { "windowSec": 60, "similarity": 0.8, "rateMax": 5, "rateWindowSec": 60 } }
+```
+
+## Several threads at once: `--batch`
+
+When you really want 2-5 related threads, create them in one call instead of looping over `threads new`:
+
+```sh
+t3ctl threads new -p myrepo -m opus -e high --batch - <<'JSON'
+[
+  "Fix the flaky login test",
+  {"prompt": "Add retries to the upload client", "title": "Upload retries", "effort": "medium"},
+  {"prompt": "Write docs for the retry policy", "model": "sonnet", "branch": "docs/retries"}
+]
+JSON
+```
+
+`--batch <file>` (`-` = stdin) takes a JSON array of prompt strings or objects with `prompt` plus optional `title`,
+`model`, `effort`, `branch`. Every other flag (`-p`, `-m`, `-e`, `--env`, `--runtime-mode`, `--draft`, `--snooze`,
+…) applies to all items. Not allowed with a prompt argument, `--stdin`, `-t`, `--branch` or `--wait` (wait per id
+with `threads wait`). Capped at 5 items. The duplicate check is skipped (the items are meant to be related); the
+rate limit still counts the whole batch unless `--force`. Threads are created in order; if one fails, the error
+is `batch_partial` with `created` (summaries so far), `failedIndex` and `cause`. Output: an array of the usual
+`threads new` summaries.
 
 ---
 

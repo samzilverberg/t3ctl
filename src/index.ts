@@ -9,6 +9,8 @@ import { registerProjects } from "./commands/projects.js";
 import { registerThreads } from "./commands/threads.js";
 import { registerModels } from "./commands/models.js";
 import { registerSchedule } from "./commands/schedule.js";
+import { CliError } from "./errors.js";
+import { pickFormat } from "./output.js";
 
 const program = new Command()
   .name("t3ctl")
@@ -28,6 +30,9 @@ registerSchedule(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const msg = err instanceof Error ? err.message : String(err);
+  if (err instanceof CliError && pickFormat(program.opts<{ format?: string }>().format) === "json") {
+    process.stdout.write(JSON.stringify({ error: { code: err.code, message: msg, ...err.details } }, null, 2) + "\n");
+  }
   process.stderr.write(`t3ctl: ${msg}\n`);
-  process.exit(1);
+  process.exit(err instanceof CliError ? err.exitCode : 1);
 });
