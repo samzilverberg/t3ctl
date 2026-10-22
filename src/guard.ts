@@ -122,7 +122,7 @@ export function checkRate(threads: ShellThread[], projectId: string, project: st
 async function firstPrompt(client: Client, threadId: string): Promise<string | undefined> {
   try {
     const d = await api.thread(client, threadId);
-    const m = ((d.thread.messages ?? []) as Array<{ role?: unknown; text?: unknown }>).find((x) => x.role === "user");
+    const m = (d.projection.messages ?? []).find((x) => x.role === "user");
     return typeof m?.text === "string" ? m.text : undefined;
   } catch { return undefined; }
 }

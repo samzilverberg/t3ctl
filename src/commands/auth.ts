@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { hostname } from "node:os";
-import { discoverServer } from "../discover.js";
+import { assertCompatible, discoverServer } from "../discover.js";
 import { forget, pair } from "../auth.js";
 import { connect, type GlobalOpts } from "../context.js";
 import { api } from "../http.js";
@@ -18,6 +18,7 @@ export function registerAuth(program: Command) {
     .action(async (o: { label: string; operate: boolean }) => {
       const g = program.opts<GlobalOpts>();
       const server = await discoverServer(g.origin);
+      assertCompatible(server);
       const res = await pair(server, o);
       const { token: _t, ...safe } = res; void _t;
       emit(pickFormat(g.format), { origin: server.origin, environmentId: server.descriptor.environmentId, ...safe, config: CONFIG_PATH }, () =>

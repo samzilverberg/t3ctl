@@ -2,11 +2,14 @@
 
 Control an **already-running** [T3 Code](https://t3.gg) desktop app from the terminal: list and read threads,
 start new ones (project, model, reasoning effort), send follow-ups, answer approvals, wait for results, and
-schedule threads for later or on a cron. Built for humans at a shell and for agents that delegate work to
+manage T3 Code's built-in scheduled tasks. Built for humans at a shell and for agents that delegate work to
 T3 Code sessions.
 
 t3ctl never starts a server. It finds the app's own backend, pairs with it once (token in the macOS Keychain) and
 talks to it over the same HTTP/WebSocket API the UI uses. macOS, Node ≥ 22, pnpm.
+
+**Requires T3 Code ≥ 0.1.0** (the beta; orchestrator V2, protocol 2). The 0.0.x alphas are refused with
+`incompatible_server` (exit 7) before any request is made; `t3ctl env` shows `supported` and why not.
 
 ## Install
 
@@ -27,8 +30,8 @@ t3ctl threads new -p myrepo --batch tasks.json     # 2-5 threads in one call
 t3ctl threads wait <ref>                           # exit 0 idle · 2 needs you · 3 error · 4 timeout
 t3ctl threads pending <ref> && t3ctl threads approve <ref>
 t3ctl threads send <ref> "Also add a regression test"
-t3ctl schedule add "tomorrow 09:00" -p myrepo "Triage new issues"
-t3ctl schedule add "0 9 * * 1-5" --thread <ref> "Daily: summarise open PRs"
+t3ctl schedule add --at 09:00 --days mon-fri -p myrepo "Triage new issues"      # T3 Code's built-in scheduler
+t3ctl schedule add --every 2h --thread <ref> "Summarise open PRs"
 ```
 
 `<ref>` is an id, an id prefix, or an exact title. `-m` takes a slug or an alias (`opus`, `sonnet`, `fable`).
@@ -37,7 +40,7 @@ Output is a table on a TTY and JSON otherwise, so the same commands work in scri
 ## Docs
 
 - [Command reference](docs/commands.md) — every command, flag, exit code and status value.
-- [Scheduler](docs/scheduler.md) — one-shot and cron jobs, the launchd ticker, grace and overlap rules.
+- [Scheduler](docs/scheduler.md) — T3 Code's scheduled tasks from the CLI; migrating from the old launchd ticker.
 - [Models and defaults](docs/models.md) — aliases, fuzzy refs, config `defaults`.
 - [Auth and tokens](docs/auth.md) — pairing, Keychain, automatic re-pairing, scopes.
 - [Agents and task trackers](docs/agents.md) — the Claude Code skill, pairing threads with your own task list.
@@ -52,5 +55,6 @@ pnpm test           # unit tests against recorded fixtures (test/fixtures)
 pnpm build          # required after changes: the global link runs dist/
 ```
 
-Status: v0.1.0, verified against T3 Code 0.0.40 (2026-09-10). The protocol is internal to T3 Code and
-unversioned; expect to re-check after app updates. MIT.
+Status: v0.5.0, verified against T3 Code 0.1.1 (2026-10-22). Minimum supported T3 Code: **0.1.0**
+(orchestration protocol 2, checked on every connect). The protocol is internal to T3 Code; expect to re-check
+after app updates. MIT.

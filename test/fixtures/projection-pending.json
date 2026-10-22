@@ -1,0 +1,24 @@
+{
+  "snapshotSequence": 381500,
+  "projection": {
+    "thread": { "id": "2bbe913a-0c2f-4b1f-8c6d-1f5d3b8e2c22", "projectId": "749237b5-59cb-4c61-88e0-7760e5e4e6b9", "title": "thread-2" },
+    "runs": [
+      { "id": "run:thread:2bbe913a:ordinal:1", "threadId": "2bbe913a-0c2f-4b1f-8c6d-1f5d3b8e2c22", "ordinal": 1, "status": "waiting", "requestedAt": "2026-10-22T05:50:00.000Z", "startedAt": "2026-10-22T05:50:01.000Z", "completedAt": null }
+    ],
+    "runtimeRequests": [
+      { "id": "rr-resolved-0", "nodeId": "n0", "providerTurnId": null, "nativeRequestRef": null, "kind": "command", "status": "resolved", "responseCapability": { "type": "live", "providerSessionId": "ps1" }, "createdAt": "2026-10-22T05:52:00.000Z", "resolvedAt": "2026-10-22T05:52:30.000Z", "decision": "accept" },
+      { "id": "rr-approval-1", "nodeId": "n1", "providerTurnId": null, "nativeRequestRef": null, "kind": "file-change", "status": "pending", "responseCapability": { "type": "live", "providerSessionId": "ps1" }, "createdAt": "2026-10-22T06:01:00.000Z", "resolvedAt": null },
+      { "id": "rr-user-input-1", "nodeId": "n2", "providerTurnId": null, "nativeRequestRef": null, "kind": "user_input", "status": "pending", "responseCapability": { "type": "live", "providerSessionId": "ps1" }, "createdAt": "2026-10-22T06:00:00.000Z", "resolvedAt": null }
+    ],
+    "messages": [
+      { "createdBy": "user", "creationSource": "web", "id": "m1", "threadId": "2bbe913a-0c2f-4b1f-8c6d-1f5d3b8e2c22", "runId": "run:thread:2bbe913a:ordinal:1", "nodeId": null, "role": "user", "text": "<text>", "attachments": [], "streaming": false, "createdAt": "2026-10-22T05:50:00.000Z", "updatedAt": "2026-10-22T05:50:00.000Z" },
+      { "createdBy": "agent", "creationSource": "provider", "id": "m2", "threadId": "2bbe913a-0c2f-4b1f-8c6d-1f5d3b8e2c22", "runId": "run:thread:2bbe913a:ordinal:1", "nodeId": "n1", "role": "assistant", "text": "<text>", "attachments": [], "streaming": true, "createdAt": "2026-10-22T05:51:00.000Z", "updatedAt": "2026-10-22T06:01:00.000Z" }
+    ],
+    "turnItems": [
+      { "id": "ti-0", "threadId": "2bbe913a-0c2f-4b1f-8c6d-1f5d3b8e2c22", "runId": "run:thread:2bbe913a:ordinal:1", "nodeId": "n0", "type": "approval_request", "requestId": "rr-resolved-0", "requestKind": "command", "prompt": "<command>" },
+      { "id": "ti-1", "threadId": "2bbe913a-0c2f-4b1f-8c6d-1f5d3b8e2c22", "runId": "run:thread:2bbe913a:ordinal:1", "nodeId": "n1", "type": "approval_request", "requestId": "rr-approval-1", "requestKind": "file-change", "prompt": "Write: <path>", "options": [{ "decision": "accept", "label": "Allow" }, { "decision": "acceptForSession", "label": "Allow for this session" }, { "decision": "decline", "label": "Deny" }] },
+      { "id": "ti-2", "threadId": "2bbe913a-0c2f-4b1f-8c6d-1f5d3b8e2c22", "runId": "run:thread:2bbe913a:ordinal:1", "nodeId": "n2", "type": "user_input_request", "requestId": "rr-user-input-1", "questions": [{ "id": "approach", "header": "Approach", "question": "Which approach should we take?", "options": [{ "label": "Remove", "description": "Delete the command" }, { "label": "Delegate", "description": "Wrap the server API" }], "multiSelect": false }] },
+      { "id": "ti-3", "threadId": "2bbe913a-0c2f-4b1f-8c6d-1f5d3b8e2c22", "runId": "run:thread:2bbe913a:ordinal:1", "nodeId": "n1", "type": "command_execution", "input": "<command>" }
+    ]
+  }
+}

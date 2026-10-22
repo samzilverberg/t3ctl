@@ -1,167 +1,255 @@
 import type { Command } from "commander";
-import { readFileSync } from "node:fs";
-import { connect, withAuthRetry, type GlobalOpts } from "../context.js";
-import { api } from "../http.js";
-import { fetchConfig } from "../models.js";
-import { emit, pickFormat, renderTable, short } from "../output.js";
-import { applyDefaults, createThread, envModeOf, matchProject, matchThread, resolveNewModel, resolveTurnModel, startTurn } from "../ops.js";
-import { threadStatus } from "../wait.js";
-import { nowIso } from "../ids.js";
-import { acquireLock, describeWhen, evaluate, LOG_PATH, newJobId, parseDuration, parseSchedule, readStore, recordRun, SCHEDULE_PATH, writeStore, type Job, type Run } from "../schedule.js";
+import { execFileSync } from "node:child_process";
+import { existsSync, renameSync } from "node:fs";
+import { connect, withAuthRetry, type Ctx, type GlobalOpts } from "../context.js";
+import { api, rpc, type ShellProject, type ShellThread } from "../http.js";
+import { fetchConfig, type ModelSelection, type ServerConfig } from "../models.js";
+import { ago, emit, pickFormat, renderTable, short } from "../output.js";
+import { applyDefaults, envModeOf, matchProject, matchThread, resolveNewModel, resolveTurnModel, INTERACTION_MODES, RUNTIME_MODES, type InteractionMode, type RuntimeMode } from "../ops.js";
+import { uuid } from "../ids.js";
+import { CliError } from "../errors.js";
+import { convertLegacyJob, cronToSchedule, describeSchedule, fixedTimeSchedule, intervalSchedule, LEGACY_LOG_PATH, LEGACY_SCHEDULE_PATH, matchTask, readLegacyJobs, type Schedule, type ScheduledTask } from "../schedule.js";
 import * as launchd from "../launchd.js";
+import { readFileSync } from "node:fs";
 
+/**
+ * `t3ctl schedule` drives T3 Code's built-in scheduler (0.1+): one source of truth, shared with the desktop UI and
+ * the MCP `schedule_task` tools. Tasks persist in the app's own database and fire from the server, with or without
+ * a client around. t3ctl adds nothing of its own on top (no local file, no launchd ticker).
+ */
 export function registerSchedule(program: Command) {
-  const sched = program.command("schedule").description("Start threads (or send follow-ups) later or on a cron; needs `schedule install` once");
+  const sched = program.command("schedule").description("Recurring tasks run by T3 Code's built-in scheduler (new thread per run, or a message into one thread)");
 
-  sched
-    .command("add <when>")
-    .argument("<prompt>", "prompt text, or - to read it from stdin")
-    .description("Schedule a new thread (-p) or a follow-up on an existing thread (--thread). <when> = one-shot (30m, 2h, HH:MM, \"tomorrow 09:00\", ISO) or cron (\"0 9 * * 1-5\", @hourly, @daily, @weekly)")
-    .option("-p, --project <ref>", "project for a new thread per occurrence")
-    .option("--thread <ref>", "instead of a new thread, send <prompt> to this thread each occurrence")
-    .option("-m, --model <ref>", "model slug or alias")
+  const scheduleFlags = (c: Command) => c
+    .option("--every <dur>", "run every <dur> (≥ 1m: 30m, 2h, 1d)")
+    .option("--at <HH:MM>", "run daily at this local time (server's time zone)")
+    .option("--days <spec>", "with --at: mon-fri, weekdays, weekends, mon,wed,fri, 0-6 (0 = Sunday)")
+    .option("--cron <expr>", "convenience: a cron expression T3 can express (*/N * * * *, M H * * D, @hourly, @daily, @weekly)")
+    .option("--webhook", "run on each request to the task's webhook URL (prompt may use {{body.x}} placeholders)", false);
+
+  const targetFlags = (c: Command) => c
+    .option("-m, --model <ref>", "model slug or alias (default: project default → server default)")
     .option("-e, --effort <level>", "reasoning effort")
-    .option("-t, --title <title>", "thread title (new threads only)")
-    .option("--env <mode>", "worktree|local (new threads only)")
-    .option("--grace <dur>", "skip the occurrence if it would fire later than this after its time (default: 60m, or half the cron interval)")
-    .action(async (when: string, promptArg: string, o: { project?: string; thread?: string; model?: string; effort?: string; title?: string; env?: string; grace?: string }) => {
+    .option("-t, --title <title>", "task title (default: first line of the prompt)")
+    .option("--runtime-mode <mode>", RUNTIME_MODES.join("|"))
+    .option("--interaction-mode <mode>", INTERACTION_MODES.join("|"))
+    .option("--env <mode>", "worktree|local for new-thread tasks (default: project/server setting)")
+    .option("--base <ref>", "base ref for worktree tasks (default: the project checkout's current branch)")
+    .option("--branch <name>", "fixed worktree branch name (default: server picks one per run)");
+
+  targetFlags(scheduleFlags(sched
+    .command("add")
+    .argument("<prompt>", "prompt text, or - to read it from stdin")
+    .description("Create a scheduled task. Pick exactly one of --every / --at / --cron / --webhook, and -p (new thread per run) or --thread (message into that thread).")
+    .option("-p, --project <ref>", "project: every run starts a new thread here")
+    .option("--thread <ref>", "instead, send the prompt into this existing thread on every run")
+    .option("--disabled", "create paused", false)))
+    .action(async (promptArg: string, o: AddOpts) => {
       const g = program.opts<GlobalOpts>();
-      if (!o.project === !o.thread) throw new Error("pass exactly one of -p <project> or --thread <ref>");
+      if (!o.project === !o.thread) throw new CliError("invalid_option", "pass exactly one of -p <project> or --thread <ref>", { option: "project" });
       const text = promptArg === "-" ? readFileSync(0, "utf8").trim() : promptArg;
-      if (!text) throw new Error("empty prompt");
-      const s = parseSchedule(when);
-      const graceSec = o.grace ? parseDuration(o.grace) : s.defaultGraceSec;
-
-      // Validate targets now so a typo does not surface at 03:00.
-      const ctx = await connect(g);
+      if (!text) throw new CliError("invalid_option", "empty prompt", { option: "prompt" });
+      const schedule = scheduleFromFlags(o);
+      if (!schedule) throw new CliError("invalid_option", "pass one of --every <dur>, --at HH:MM [--days …], --cron <expr>, --webhook", { option: "schedule" });
+      const ctx = await connect(g, { write: true });
       const shell = await withAuthRetry(ctx, g, api.shell);
-      const project = o.project ? matchProject(shell.projects, o.project) : undefined;
-      if (o.thread) matchThread(shell.threads, o.thread);
-      if (project) {
-        const config = await fetchConfig(ctx.server, ctx.client.token);
-        const d = applyDefaults({ model: o.model, effort: o.effort, env: o.env });
-        await resolveNewModel(ctx, project, d, config);
-        envModeOf(d.env, config.settings);
-      } else {
-        await resolveTurnModel(ctx, matchThread(shell.threads, o.thread!), o);
-      }
-
-      const job: Job = {
-        id: newJobId(), createdAt: nowIso(), cron: s.cron, nextAt: s.nextAt, graceSec, runs: [],
-        ...(o.project
-          ? { new: { project: project!.id, projectTitle: project!.title, text, model: o.model, effort: o.effort, title: o.title, env: o.env } }
-          : { send: { thread: matchThread(shell.threads, o.thread!).id, text, model: o.model, effort: o.effort } }),
+      const config = await fetchConfig(ctx.server, ctx.client.token);
+      const target = await resolveTarget(ctx, shell, config, o);
+      const input = {
+        commandId: uuid(), title: (o.title ?? text.split("\n")[0]).trim().slice(0, 80) || "Scheduled task", prompt: text, enabled: !o.disabled, schedule,
+        ...target, createdBy: "user", creationSource: "server",
       };
-      const store = readStore(); store.jobs.push(job); writeStore(store);
-      const loaded = launchd.isLoaded();
-      emit(ctx.format, { ...job, tickerInstalled: loaded }, () => `scheduled ${job.id}  ${job.cron ? `cron ${job.cron}` : "once"}  next ${job.nextAt}  grace ${graceSec}s${loaded ? "" : "\nwarning: ticker not installed; run `t3ctl schedule install`"}`);
-      if (!loaded) process.stderr.write("t3ctl: ticker not installed; nothing will fire until `t3ctl schedule install`\n");
+      const { task } = await withAuthRetry(ctx, g, (c) => rpc<{ task: ScheduledTask }>(c, "scheduledTasks.upsert", input));
+      emit(ctx.format, task, () => `scheduled ${task.id}  ${describeSchedule(task.schedule)}  next ${task.nextRunAt ?? "-"}${task.webhook?.url ? `\nwebhook ${task.webhook.url}` : task.schedule.type === "webhook" ? "\nwebhook URL needs T3 Connect remote access" : ""}`);
     });
 
   sched
     .command("list", { isDefault: true })
-    .description("List scheduled jobs (pending by default)")
-    .option("-a, --all", "include finished one-shots", false)
-    .action((o: { all: boolean }) => {
+    .description("List scheduled tasks")
+    .option("-p, --project <ref>", "only this project")
+    .action(async (o: { project?: string }) => {
       const g = program.opts<GlobalOpts>();
-      const store = readStore();
-      const jobs = o.all ? store.jobs : store.jobs.filter((j) => j.nextAt);
-      const ticker = launchd.isLoaded();
-      emit(pickFormat(g.format), { ticker: ticker ? "installed" : "not installed", file: SCHEDULE_PATH, jobs }, () =>
-        `ticker: ${ticker ? "installed" : "NOT installed (run `t3ctl schedule install`)"}\n` +
-        renderTable(jobs.map((j) => {
-          const last = j.runs.at(-1);
-          return {
-            id: j.id, when: describeWhen(j), next: j.nextAt ?? "-", grace: `${Math.round(j.graceSec / 60)}m`,
-            target: j.new ? `new @${j.new.projectTitle ?? j.new.project}${j.new.model ? ` ${j.new.model}${j.new.effort ? "@" + j.new.effort : ""}` : ""}` : `send ${short(j.send!.thread)}`,
-            prompt: (j.new?.text ?? j.send?.text ?? "").split("\n")[0].slice(0, 40),
-            last: last ? `${last.status}${last.threadId ? " " + short(last.threadId) : ""}${last.reason ? " (" + last.reason + ")" : ""}` : "",
-          };
-        }), ["id", "when", "next", "grace", "target", "prompt", "last"]));
+      const ctx = await connect(g);
+      const [shell, { tasks }] = await Promise.all([withAuthRetry(ctx, g, api.shell), withAuthRetry(ctx, g, (c) => rpc<{ tasks: ScheduledTask[] }>(c, "scheduledTasks.list", {}))]);
+      const projects = new Map(shell.projects.map((p) => [p.id, p.title]));
+      let list = tasks;
+      if (o.project) { const p = matchProject(shell.projects, o.project); list = list.filter((t) => t.projectId === p.id); }
+      list = [...list].sort((a, b) => (a.nextRunAt ?? "~").localeCompare(b.nextRunAt ?? "~"));
+      const legacy = legacyState();
+      emit(ctx.format, { tasks: list.map((t) => ({ ...t, projectTitle: projects.get(t.projectId) ?? "" })), ...(legacy ? { legacy } : {}) }, () =>
+        renderTable(list.map((t) => ({
+          id: short(t.id), on: t.enabled ? "on" : "off", schedule: describeSchedule(t.schedule), target: t.threadId ? `→ ${short(t.threadId)}` : `new @${projects.get(t.projectId) ?? short(t.projectId)}`,
+          model: `${t.modelSelection.model}${effort(t.modelSelection) ? "@" + effort(t.modelSelection) : ""}`, title: t.title.slice(0, 40), next: t.nextRunAt ? ago(t.nextRunAt).replace(/^/, "in ") : "-", last: t.lastRunStatus === "never" ? "" : `${t.lastRunStatus} ${t.lastRunAt ? ago(t.lastRunAt) + " ago" : ""}${t.lastRunError ? " (" + t.lastRunError.slice(0, 40) + ")" : ""}`, runs: t.runCount,
+        })), ["id", "on", "schedule", "target", "model", "title", "next", "last", "runs"]) + (legacy ? `\n\nlegacy t3ctl scheduler still present (${legacy.pendingJobs} pending job(s)${legacy.tickerInstalled ? ", launchd ticker installed" : ""}); run \`t3ctl schedule migrate\`` : ""));
     });
 
   sched
-    .command("remove <id>")
-    .description("Remove a job")
-    .action((id: string) => {
-      const store = readStore();
-      const i = store.jobs.findIndex((j) => j.id === id);
-      if (i < 0) throw new Error(`job not found: ${id}`);
-      const [job] = store.jobs.splice(i, 1); writeStore(store);
-      emit(pickFormatFor(program), job, () => `removed ${job.id}`);
+    .command("show <ref>")
+    .description("Show one task (full JSON)")
+    .action(async (ref: string) => {
+      const ctx = await connect(program.opts<GlobalOpts>());
+      const task = await findTask(ctx, program.opts<GlobalOpts>(), ref);
+      emit(ctx.format, task, () => JSON.stringify(task, null, 2));
     });
 
-  sched
-    .command("tick")
-    .description("Fire due jobs (what the launchd ticker runs every minute)")
-    .action(async () => {
+  targetFlags(scheduleFlags(sched
+    .command("update <ref>")
+    .argument("[prompt]", "new prompt text, or - to read it from stdin")
+    .description("Change a task's schedule, prompt, title, model or modes (unspecified fields are kept)")))
+    .action(async (ref: string, promptArg: string | undefined, o: UpdateOpts) => {
       const g = program.opts<GlobalOpts>();
-      const release = acquireLock();
-      if (!release) { process.stderr.write("t3ctl: another tick holds the lock\n"); return; }
-      try {
-        const results = await tick(g);
-        // One log line per action goes to stderr (see `log`); print JSON only when explicitly asked.
-        if (results.length && g.format === "json") emit("json", results);
-      } finally { release(); }
+      const ctx = await connect(g, { write: true });
+      const existing = await findTask(ctx, g, ref);
+      const text = promptArg === "-" ? readFileSync(0, "utf8").trim() : promptArg;
+      const schedule = scheduleFromFlags(o) ?? existing.schedule;
+      let modelSelection: ModelSelection = existing.modelSelection;
+      if (o.model || o.effort) {
+        const shell = await withAuthRetry(ctx, g, api.shell);
+        const project = shell.projects.find((p) => p.id === existing.projectId);
+        if (!project) throw new CliError("project_not_found", `task's project ${existing.projectId} no longer exists`, { ref: existing.projectId });
+        modelSelection = (await resolveNewModel(ctx, project, { model: o.model ?? `${existing.modelSelection.instanceId}/${existing.modelSelection.model}`, effort: o.effort })).modelSelection;
+      }
+      const d = applyDefaults({ runtimeMode: (o.runtimeMode ?? existing.runtimeMode) as RuntimeMode, interactionMode: (o.interactionMode ?? existing.interactionMode) as InteractionMode });
+      const input = {
+        id: existing.id, requireExisting: true, commandId: uuid(),
+        title: o.title ?? existing.title, prompt: text ?? existing.prompt, enabled: existing.enabled, schedule,
+        projectId: existing.projectId, threadId: existing.threadId, workspaceStrategy: existing.workspaceStrategy, modelSelection,
+        runtimeMode: d.runtimeMode, interactionMode: d.interactionMode, createdBy: existing.createdBy, creationSource: existing.creationSource,
+      };
+      const { task } = await withAuthRetry(ctx, g, (c) => rpc<{ task: ScheduledTask }>(c, "scheduledTasks.upsert", input));
+      emit(ctx.format, task, () => `updated ${task.id}  ${describeSchedule(task.schedule)}  next ${task.nextRunAt ?? "-"}`);
     });
 
-  sched.command("install").description("Install the launchd ticker (runs `schedule tick` every minute while you are logged in)").action(() => {
-    const r = launchd.install();
-    emit(pickFormatFor(program), { ...r, label: launchd.LAUNCHD_LABEL, log: LOG_PATH }, () => `installed ${launchd.LAUNCHD_LABEL}\nplist ${r.plist}\nnode  ${r.node}\nlog   ${LOG_PATH}`);
-  });
-  sched.command("uninstall").description("Remove the launchd ticker (jobs stay in the file)").action(() => {
-    const r = launchd.uninstall();
-    emit(pickFormatFor(program), r, () => (r.removed ? "uninstalled" : "was not installed"));
-  });
-}
-
-interface TickResult { job: string; at: string; status: Run["status"]; threadId?: string; reason?: string }
-
-async function tick(g: GlobalOpts): Promise<TickResult[]> {
-  const now = new Date();
-  const store = readStore();
-  const due = store.jobs.map((job) => ({ job, ev: evaluate(job, now) })).filter((x) => x.ev.due) as Array<{ job: Job; ev: Extract<ReturnType<typeof evaluate>, { due: true }> }>;
-  if (due.length === 0) return [];
-  const results: TickResult[] = [];
-  let ctx: Awaited<ReturnType<typeof connect>> | undefined;
-  let shell: Awaited<ReturnType<typeof api.shell>> | undefined;
-
-  for (const { job, ev } of due) {
-    // Claim the occurrence before doing anything, so a crash cannot double-fire.
-    job.nextAt = ev.nextAt; writeStore(store);
-    const base = { at: ev.at, firedAt: nowIso() };
-    const finish = (run: Run) => { recordRun(job, run); writeStore(store); results.push({ job: job.id, at: run.at, status: run.status, threadId: run.threadId, reason: run.reason }); log(job, run); };
-
-    if (ev.late) { finish({ ...base, status: "skipped", reason: `late by ${fmtSec((now.getTime() - Date.parse(ev.at)) / 1000)}${ev.missed ? `, ${ev.missed} earlier occurrence(s) missed` : ""}` }); continue; }
-    try {
-      ctx ??= await connect(g, { write: true });
-      shell ??= await withAuthRetry(ctx, g, api.shell);
-      // Recurring: never start while the previous run's thread is still busy.
-      const prev = job.cron ? [...job.runs].reverse().find((r) => r.status === "fired" && r.threadId) : undefined;
-      const watch = prev?.threadId ?? job.send?.thread;
-      if (watch) {
-        const t = shell.threads.find((x) => x.id === watch);
-        const st = t ? threadStatus(t) : undefined;
-        if (st && (st === "running" || st.startsWith("needs-"))) { finish({ ...base, status: "skipped", reason: `previous run ${short(watch)} is ${st}` }); continue; }
-      }
-      if (job.new) {
-        const s = await createThread(ctx, g, { ...job.new, title: job.new.title ?? `${job.new.text.split("\n")[0].slice(0, 60)}` });
-        finish({ ...base, status: "fired", threadId: s.threadId, sequence: s.sequence });
-      } else if (job.send) {
-        const t = matchThread(shell.threads, job.send.thread);
-        const r = await startTurn(ctx, g, t, job.send);
-        finish({ ...base, status: "fired", threadId: t.id, sequence: r.sequence });
-      }
-    } catch (e) {
-      finish({ ...base, status: "failed", reason: e instanceof Error ? e.message : String(e) });
-    }
+  for (const [name, enabled] of [["enable", true], ["disable", false]] as const) {
+    sched.command(`${name} <ref>`).description(`${name === "enable" ? "Resume" : "Pause"} a task`).action(async (ref: string) => {
+      const g = program.opts<GlobalOpts>();
+      const ctx = await connect(g, { write: true });
+      const existing = await findTask(ctx, g, ref);
+      const { task } = await withAuthRetry(ctx, g, (c) => rpc<{ task: ScheduledTask }>(c, "scheduledTasks.setEnabled", { id: existing.id, enabled }));
+      emit(ctx.format, task, () => `${name}d ${task.id}  next ${task.nextRunAt ?? "-"}`);
+    });
   }
-  return results;
+
+  sched.command("remove <ref>").alias("delete").description("Delete a task").action(async (ref: string) => {
+    const g = program.opts<GlobalOpts>();
+    const ctx = await connect(g, { write: true });
+    const existing = await findTask(ctx, g, ref);
+    const res = await withAuthRetry(ctx, g, (c) => rpc<{ id: string }>(c, "scheduledTasks.delete", { id: existing.id }));
+    emit(ctx.format, { ...res, title: existing.title }, () => `removed ${res.id} (${existing.title})`);
+  });
+
+  sched.command("run <ref>").description("Run a task now (its next scheduled run is unaffected)").action(async (ref: string) => {
+    const g = program.opts<GlobalOpts>();
+    const ctx = await connect(g, { write: true });
+    const existing = await findTask(ctx, g, ref);
+    const { task } = await withAuthRetry(ctx, g, (c) => rpc<{ task: ScheduledTask }>(c, "scheduledTasks.runNow", { id: existing.id }));
+    emit(ctx.format, task, () => `run requested for ${task.id}  last ${task.lastRunStatus}${task.lastRunError ? " (" + task.lastRunError + ")" : ""}`);
+  });
+
+  sched
+    .command("migrate")
+    .description(`Move jobs from the pre-0.5 client-side scheduler (${LEGACY_SCHEDULE_PATH}) into T3 Code and remove the launchd ticker. Dry run unless --apply.`)
+    .option("--apply", "create the tasks, then uninstall the ticker and rename the legacy file", false)
+    .action(async (o: { apply: boolean }) => {
+      const g = program.opts<GlobalOpts>();
+      const jobs = readLegacyJobs();
+      const pending = jobs.filter((j) => j.nextAt);
+      const conversions = pending.map(convertLegacyJob);
+      const ticker = launchd.isLoaded();
+      const ctx = await connect(g, { write: o.apply });
+      const shell = await withAuthRetry(ctx, g, api.shell);
+      const config = await fetchConfig(ctx.server, ctx.client.token);
+      const plan: Array<Record<string, unknown>> = [];
+      const created: ScheduledTask[] = [];
+      for (const c of conversions) {
+        if (!c.ok) { plan.push({ job: c.job.id, action: "skip", reason: c.reason, cron: c.job.cron ?? null, nextAt: c.job.nextAt }); continue; }
+        try {
+          const target = await resolveTarget(ctx, shell, config, { project: c.job.new?.project, thread: c.job.send?.thread, model: c.job.new?.model ?? c.job.send?.model, effort: c.job.new?.effort ?? c.job.send?.effort, env: c.job.new?.env, runtimeMode: c.job.new?.runtimeMode as RuntimeMode | undefined, interactionMode: c.job.new?.interactionMode as InteractionMode | undefined });
+          const input = { commandId: `t3ctl-migrate:${c.job.id}`, title: c.title, prompt: c.prompt, enabled: true, schedule: c.schedule, ...target, createdBy: "user", creationSource: "server" };
+          plan.push({ job: c.job.id, action: o.apply ? "create" : "would-create", cron: c.job.cron, schedule: describeSchedule(c.schedule), target: target.threadId ? `thread ${short(target.threadId)}` : `project ${target.projectId}`, ...(c.note ? { note: c.note } : {}) });
+          if (o.apply) created.push((await withAuthRetry(ctx, g, (cl) => rpc<{ task: ScheduledTask }>(cl, "scheduledTasks.upsert", input))).task);
+        } catch (e) {
+          plan.push({ job: c.job.id, action: "skip", reason: e instanceof Error ? e.message : String(e), cron: c.job.cron ?? null });
+        }
+      }
+      let cleanup: Record<string, unknown> = {};
+      if (o.apply) {
+        const un = launchd.uninstall();
+        const archived = `${LEGACY_SCHEDULE_PATH.replace(/\.json$/, "")}.legacy.json`;
+        if (existsSync(LEGACY_SCHEDULE_PATH)) renameSync(LEGACY_SCHEDULE_PATH, archived);
+        cleanup = { tickerRemoved: un.removed, legacyFile: existsSync(archived) ? archived : null, log: LEGACY_LOG_PATH };
+      }
+      const out = { apply: o.apply, legacyJobs: jobs.length, pendingJobs: pending.length, tickerInstalled: ticker, plan, created: created.map((t) => ({ id: t.id, title: t.title, schedule: describeSchedule(t.schedule), nextRunAt: t.nextRunAt })), ...cleanup };
+      emit(ctx.format, out, () => [
+        `legacy jobs: ${jobs.length} (${pending.length} pending)  ticker: ${ticker ? "installed" : "not installed"}`,
+        ...plan.map((p) => `  ${p.job}  ${p.action}  ${p.cron ?? "once"}${p.schedule ? ` → ${p.schedule}` : ""}${p.target ? `  ${p.target}` : ""}${p.reason ? `  (${p.reason})` : ""}${p.note ? `  [${p.note}]` : ""}`),
+        o.apply ? `created ${created.length} task(s); ticker ${cleanup.tickerRemoved ? "removed" : "was not installed"}; legacy file → ${cleanup.legacyFile ?? "(none)"}` : "dry run; re-run with --apply to create these tasks and remove the ticker",
+      ].join("\n"));
+    });
+
+  // The launchd agent of ≤ 0.4 keeps invoking `schedule tick` every minute until `migrate --apply` removes it.
+  // Stay quiet and successful so it does not spam the log; `install` points at the replacement.
+  sched.command("tick", { hidden: true }).action(() => { process.stderr.write("t3ctl: the client-side scheduler was removed in 0.5; run `t3ctl schedule migrate --apply`\n"); });
+  for (const legacy of ["install", "uninstall"]) {
+    sched.command(legacy, { hidden: true }).action(() => { throw new CliError("removed_command", `\`schedule ${legacy}\` is gone: T3 Code 0.1+ schedules server-side. Run \`t3ctl schedule migrate\` to move legacy jobs and remove the ticker.`, { command: `schedule ${legacy}` }); });
+  }
 }
 
-function log(job: Job, run: Run) {
-  process.stderr.write(`${run.firedAt} job ${job.id} occurrence ${run.at} ${run.status}${run.threadId ? " thread " + run.threadId : ""}${run.reason ? " — " + run.reason : ""}\n`);
-}
-function fmtSec(s: number): string { return s < 3600 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`; }
+interface TargetOpts { project?: string; thread?: string; model?: string; effort?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode }
+interface ScheduleOpts { every?: string; at?: string; days?: string; cron?: string; webhook?: boolean }
+type AddOpts = TargetOpts & ScheduleOpts & { title?: string; disabled: boolean };
+type UpdateOpts = Omit<TargetOpts, "project" | "thread"> & ScheduleOpts & { title?: string };
 
-function pickFormatFor(program: Command) { return pickFormat(program.opts<GlobalOpts>().format); }
+function scheduleFromFlags(o: ScheduleOpts): Schedule | undefined {
+  const picked = [o.every !== undefined, o.at !== undefined, o.cron !== undefined, o.webhook === true].filter(Boolean).length;
+  if (picked > 1) throw new CliError("invalid_option", "pass only one of --every, --at, --cron, --webhook", { option: "schedule" });
+  if (o.days !== undefined && o.at === undefined) throw new CliError("invalid_option", "--days needs --at HH:MM", { option: "days" });
+  if (o.every !== undefined) return intervalSchedule(o.every);
+  if (o.at !== undefined) return fixedTimeSchedule(o.at, o.days);
+  if (o.cron !== undefined) return cronToSchedule(o.cron);
+  if (o.webhook) return { type: "webhook", signature: null };
+  return undefined;
+}
+
+const effort = (ms: { options?: Array<{ id: string; value: unknown }> }) => { const v = ms.options?.find((x) => x.id === "effort")?.value; return typeof v === "string" ? v : undefined; };
+
+function gitBranch(cwd: string): string | undefined {
+  try { const b = execFileSync("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); return b && b !== "HEAD" ? b : undefined; } catch { return undefined; }
+}
+
+/** Project / thread / model / modes / workspace strategy for an upsert, validated against the live catalog. */
+async function resolveTarget(ctx: Ctx, shell: { projects: ShellProject[]; threads: ShellThread[]; archivedThreads?: ShellThread[] }, config: ServerConfig, o: TargetOpts): Promise<{ projectId: string; threadId: string | null; workspaceStrategy: Record<string, unknown>; modelSelection: ModelSelection; runtimeMode: RuntimeMode; interactionMode: InteractionMode }> {
+  const d = applyDefaults({ model: o.model, effort: o.effort, env: o.env, runtimeMode: o.runtimeMode, interactionMode: o.interactionMode });
+  if (o.thread) {
+    const t = matchThread([...shell.threads, ...(shell.archivedThreads ?? [])], o.thread);
+    if (t.archivedAt) throw new CliError("thread_archived", `thread ${short(t.id)} is archived`, { threadId: t.id });
+    const project = shell.projects.find((p) => p.id === t.projectId);
+    if (!project) throw new CliError("project_not_found", `thread ${short(t.id)} belongs to an unknown project`, { ref: t.projectId });
+    // A bound run follows the thread's current provider; the stored selection only matters for new threads.
+    const modelSelection = (await resolveTurnModel(ctx, t, { model: d.model, effort: d.effort })) ?? (t.modelSelection as ModelSelection | undefined) ?? (await resolveNewModel(ctx, project, {}, config)).modelSelection;
+    return { projectId: project.id, threadId: t.id, workspaceStrategy: { type: "root" }, modelSelection, runtimeMode: (o.runtimeMode ?? (t.runtimeMode as RuntimeMode | undefined) ?? d.runtimeMode), interactionMode: (o.interactionMode ?? (t.interactionMode as InteractionMode | undefined) ?? d.interactionMode) };
+  }
+  const project = matchProject(shell.projects, o.project ?? "");
+  const { modelSelection, settings } = await resolveNewModel(ctx, project, { model: d.model, effort: d.effort }, config);
+  const envMode = envModeOf(d.env, settings, project.defaultThreadEnvMode);
+  const branch = gitBranch(project.workspaceRoot);
+  const baseRef = o.base ?? branch;
+  const workspaceStrategy = envMode === "worktree" && baseRef
+    ? { type: "worktree", baseRef, ...(o.branch ? { branch: o.branch } : {}), ...(settings.newWorktreesStartFromOrigin === true ? { startFromOrigin: true } : {}) }
+    : { type: "root", ...(branch ? { branch } : {}) };
+  return { projectId: project.id, threadId: null, workspaceStrategy, modelSelection, runtimeMode: d.runtimeMode, interactionMode: d.interactionMode };
+}
+
+async function findTask(ctx: Ctx, g: GlobalOpts, ref: string): Promise<ScheduledTask> {
+  const { tasks } = await withAuthRetry(ctx, g, (c) => rpc<{ tasks: ScheduledTask[] }>(c, "scheduledTasks.list", {}));
+  return matchTask(tasks, ref);
+}
+
+function legacyState(): { pendingJobs: number; tickerInstalled: boolean; file: string } | undefined {
+  const jobs = readLegacyJobs();
+  const ticker = launchd.isLoaded();
+  if (jobs.length === 0 && !ticker) return undefined;
+  return { pendingJobs: jobs.filter((j) => j.nextAt).length, tickerInstalled: ticker, file: LEGACY_SCHEDULE_PATH };
+}
+
+export { pickFormat };

@@ -1,41 +1,54 @@
 import type { Server } from "./discover.js";
-import type { ShellThread } from "./http.js";
+import type { Message, Run, RuntimeRequest, ShellThread, ThreadProjection } from "./http.js";
 import { RpcSocket } from "./ws.js";
 
 export type ThreadStatus = "running" | "idle" | "needs-approval" | "needs-input" | "error" | "interrupted" | "archived" | "new" | string;
 
-/** Mirrors the UI's idle heuristic: no active turn and latest turn in a terminal state. */
+const ACTIVE_RUN = new Set(["preparing", "queued", "starting", "running", "waiting"]);
+const USER_INPUT_KINDS = new Set(["user_input"]);
+
+/** `needs-input` for questions, `needs-approval` for every other pending runtime request (command, file-change, permission, …). */
+export function statusOfRequest(kind: string | undefined): "needs-approval" | "needs-input" {
+  return kind && USER_INPUT_KINDS.has(kind) ? "needs-input" : "needs-approval";
+}
+
+/**
+ * Derived from the V2 shell row: `status` is `idle` or the active/latest run's status, and `pendingRuntimeRequest`
+ * is set while the run waits on a human. A pending request wins over "running" (the run is blocked on it).
+ */
 export function threadStatus(t: ShellThread): ThreadStatus {
   if (t.archivedAt) return "archived";
-  if (t.hasPendingApprovals) return "needs-approval";
-  if (t.hasPendingUserInput) return "needs-input";
-  if (t.session?.activeTurnId) return "running";
-  const st = t.latestTurn?.state;
-  if (st === "running" || st === "requested") return "running";
-  if (st === "completed") return "idle";
-  if (st === "error") return "error";
-  if (st === "interrupted") return "interrupted";
-  if (t.session?.status) return t.session.status;
-  return st ?? "new";
+  if (t.pendingRuntimeRequest) return statusOfRequest(t.pendingRuntimeRequest.kind);
+  if (t.activeRunId) return "running";
+  const st = t.status;
+  if (st === undefined) return t.latestRunId ? "idle" : "new";
+  if (ACTIVE_RUN.has(st)) return "running";
+  if (st === "idle" || st === "completed" || st === "rolled_back") return t.latestRunId === undefined && !t.updatedAt ? "new" : "idle";
+  if (st === "failed") return "error";
+  if (st === "interrupted" || st === "cancelled") return "interrupted";
+  return st;
 }
 
 export interface WaitOutcome {
   threadId: string;
   status: ThreadStatus;
   reason: "idle" | "needs-human" | "error" | "timeout" | "aborted";
-  turnId?: string;
+  runId?: string;
   lastAssistantText?: string;
   events: number;
 }
 
-interface StreamItem { kind: string; snapshot?: { thread: ShellThread & { messages?: Array<Record<string, unknown>> } }; event?: Record<string, unknown> }
+export interface StreamItem { kind: string; snapshotSequence?: number; projection?: ThreadProjection; sequence?: number; event?: { type: string; payload?: unknown; [k: string]: unknown } }
+
+const terminal = (run: Run): "idle" | "error" | "interrupted" | undefined =>
+  run.status === "completed" || run.status === "rolled_back" ? "idle" : run.status === "failed" ? "error" : run.status === "interrupted" || run.status === "cancelled" ? "interrupted" : undefined;
 
 /**
- * Subscribe to a thread and resolve when its current turn finishes (or a human is needed).
- * Uses the live thread stream; state is derived from `thread.session-set` and turn events.
- * `afterSequence` lets a caller start right after a dispatch it just made.
+ * Subscribe to a thread and resolve when its run finishes (or a human is needed). State is derived from the
+ * snapshot's runs/runtimeRequests and from `run.updated` / `runtime-request.updated` / `message.updated` events.
+ * `poll` (shell row) is a safety net for anything the stream does not carry.
  */
-export async function waitForIdle(server: Server, token: string, threadId: string, opts: { timeoutMs?: number; afterSequence?: number; signal?: AbortSignal; onEvent?: (item: StreamItem) => void; requireTurnStart?: boolean; poll?: () => Promise<ShellThread | undefined>; pollMs?: number } = {}): Promise<WaitOutcome> {
+export async function waitForIdle(server: Server, token: string, threadId: string, opts: { timeoutMs?: number; afterSequence?: number; signal?: AbortSignal; onEvent?: (item: StreamItem) => void; requireRunStart?: boolean; poll?: () => Promise<ShellThread | undefined>; pollMs?: number } = {}): Promise<WaitOutcome> {
   const sock = new RpcSocket(server, token);
   const ac = new AbortController();
   opts.signal?.addEventListener("abort", () => ac.abort(), { once: true });
@@ -43,13 +56,11 @@ export async function waitForIdle(server: Server, token: string, threadId: strin
   const timer = opts.timeoutMs ? setTimeout(() => { timedOut = true; ac.abort(); }, opts.timeoutMs) : undefined;
   let sawActive = false;
   let status: ThreadStatus = "new";
-  let turnId: string | undefined;
+  let runId: string | undefined;
   let lastAssistantText: string | undefined;
   let events = 0;
   let reason: WaitOutcome["reason"] = "aborted";
-  const assistantBuf = new Map<string, string>();
-  // `hasPendingApprovals` / `hasPendingUserInput` live on the shell row, not in the thread stream,
-  // so poll the shell snapshot on the side to detect "needs a human".
+  const runs = new Map<string, Run>();
   let pollTimer: NodeJS.Timeout | undefined;
   let pollStatus: ThreadStatus | undefined;
   if (opts.poll) {
@@ -64,48 +75,44 @@ export async function waitForIdle(server: Server, token: string, threadId: strin
     };
     pollTimer = setInterval(tick, opts.pollMs ?? 5000);
   }
+  const noteRun = (run: Run) => {
+    runs.set(run.id, run);
+    if (ACTIVE_RUN.has(run.status)) { sawActive = true; runId = run.id; status = "running"; return undefined; }
+    const t = terminal(run);
+    if (t && (runId === undefined || runId === run.id)) { runId = run.id; status = t; }
+    return t;
+  };
+  const noteMessage = (m: Message) => { if (m.role === "assistant" && typeof m.text === "string" && m.text.length > 0) lastAssistantText = m.text; };
   try {
-    const payload: Record<string, unknown> = { threadId, turnLimit: 1, requestCompletionMarker: true };
+    const payload: Record<string, unknown> = { threadId, requestCompletionMarker: true };
     if (opts.afterSequence !== undefined) payload.afterSequence = opts.afterSequence;
     for await (const item of sock.subscribe<StreamItem>("orchestration.subscribeThread", payload, ac.signal)) {
       events++;
       opts.onEvent?.(item);
-      if (item.kind === "snapshot" && item.snapshot) {
-        const t = item.snapshot.thread;
-        status = threadStatus(t);
-        turnId = t.session?.activeTurnId ?? t.latestTurn?.turnId ?? undefined;
-        if (status === "running") sawActive = true;
-        const lastA = [...(t.messages ?? [])].reverse().find((m) => m.role === "assistant");
-        if (lastA && typeof lastA.text === "string") lastAssistantText = lastA.text;
-        if (!opts.requireTurnStart && (status === "idle" || status === "error" || status === "interrupted") && !sawActive) {
-          // Already idle before we started and caller does not insist on observing a turn.
-          reason = status === "idle" ? "idle" : "error"; break;
-        }
-        if (status === "needs-approval" || status === "needs-input") { reason = "needs-human"; break; }
+      if (item.kind === "snapshot" && item.projection) {
+        const p = item.projection;
+        for (const m of p.messages ?? []) noteMessage(m);
+        const pending = (p.runtimeRequests ?? []).find((r) => r.status === "pending");
+        if (pending) { status = statusOfRequest(pending.kind); reason = "needs-human"; break; }
+        const latest = [...(p.runs ?? [])].sort((a, b) => a.ordinal - b.ordinal).at(-1);
+        if (latest) {
+          const t = noteRun(latest);
+          if (t && !opts.requireRunStart && !sawActive) { reason = t === "idle" ? "idle" : "error"; break; }
+        } else if (!opts.requireRunStart) { status = "new"; reason = "idle"; break; }
         continue;
       }
       if (item.kind !== "event" || !item.event) continue;
       const ev = item.event;
-      const type = String(ev.type);
-      // OrchestrationEvent = { type, sequence, ...EventBaseFields, payload }
-      const p = (ev.payload as Record<string, unknown> | undefined) ?? {};
-      if (type === "thread.turn-start-requested") { sawActive = true; if (typeof p.turnId === "string") turnId = p.turnId; status = "running"; }
-      else if (type === "thread.message.assistant.delta") {
-        const id = String(p.messageId); assistantBuf.set(id, (assistantBuf.get(id) ?? "") + String(p.delta ?? ""));
-        lastAssistantText = assistantBuf.get(id);
-      } else if (type === "thread.message-sent" || type === "thread.message.assistant.complete") {
-        const msg = (p.message as Record<string, unknown> | undefined) ?? p;
-        // The finalize event re-sends the message with streaming:false and an empty text; keep the last non-empty text.
-        if (msg.role === "assistant" && typeof msg.text === "string" && msg.text.length > 0) lastAssistantText = msg.text;
-      } else if (type === "thread.session-set") {
-        const s = p.session as { status?: string; activeTurnId?: string | null; lastError?: unknown } | undefined;
-        if (!s) continue;
-        if (s.activeTurnId) { sawActive = true; turnId = s.activeTurnId; status = "running"; continue; }
-        if (s.status === "starting") continue;
-        if (sawActive) {
-          status = s.lastError || s.status === "error" ? "error" : s.status === "interrupted" ? "interrupted" : "idle";
-          reason = status === "idle" ? "idle" : "error"; break;
-        }
+      const p = ev.payload as Record<string, unknown> | undefined;
+      if (!p) continue;
+      if (ev.type === "run.created" || ev.type === "run.updated") {
+        const t = noteRun(p as unknown as Run);
+        if (t && sawActive) { reason = t === "idle" ? "idle" : "error"; break; }
+      } else if (ev.type === "runtime-request.updated") {
+        const r = p as unknown as RuntimeRequest;
+        if (r.status === "pending") { status = statusOfRequest(r.kind); reason = "needs-human"; break; }
+      } else if (ev.type === "message.updated") {
+        noteMessage(p as unknown as Message);
       }
     }
   } finally {
@@ -116,5 +123,5 @@ export async function waitForIdle(server: Server, token: string, threadId: strin
   if (pollStatus) { status = pollStatus; reason = pollStatus === "needs-approval" || pollStatus === "needs-input" ? "needs-human" : pollStatus === "idle" ? "idle" : "error"; }
   else if (timedOut) reason = "timeout";
   else if (reason === "aborted" && opts.signal?.aborted) reason = "aborted";
-  return { threadId, status, reason, turnId, lastAssistantText, events };
+  return { threadId, status, reason, runId, lastAssistantText, events };
 }

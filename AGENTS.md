@@ -5,15 +5,24 @@ start a T3 server. README.md holds the user docs and protocol research; this fil
 
 ## Ground rules
 
+- **Target: T3 Code ≥ 0.1.0 (orchestrator V2, protocol 2).** `MIN_SERVER_VERSION` / `SUPPORTED_PROTOCOL` in
+  `src/discover.ts` gate every connect (`incompatible_server`, exit 7). Do not add compatibility branches for the
+  0.0.x alphas; bump the constants (and re-check the contracts) when T3 Code bumps the protocol.
 - **Build after every source change: `pnpm build`.** The command is installed with `pnpm link --global`, so
   `dist/` is what every user and agent on this machine runs. Unbuilt changes are invisible. `pnpm typecheck`
   alone is not enough.
 - **Never touch T3's SQLite or secrets.** Auth goes through the official `t3 auth pairing create` + `/oauth/token`.
-- **Writes go over the WebSocket RPC** (`orchestration.dispatchCommand`), not `POST /api/orchestration/dispatch`.
-  Only the WS handler implements the `thread.turn.start` bootstrap. Reads may use HTTP.
+- **Writes go over the WebSocket RPC**: `orchestration.launchThread` creates a thread with its workspace and
+  first run; everything else is an `OrchestrationV2Command` via `orchestration.dispatchCommand`
+  (`message.dispatch`, `runtime-request.respond`, `thread.stop`, `thread.*`). Projects use
+  `POST /api/projects/mutate`. Reads use HTTP with the `x-t3-orchestration-protocol: 2` header; the WS URL carries
+  `?orchestrationProtocol=2`. The scheduler is the server's (`scheduledTasks.*`), never a local file or ticker.
 - **Type only what you render.** `@t3tools/contracts` is unpublished and changes per release; keep interfaces in
   `src/http.ts` loose and pass unknown fields through. Check `/tmp/t3code-src` (tag matching the installed
-  `serverVersion`) or clone `pingdotgg/t3code` when you need a schema. Event payloads live under `event.payload`.
+  `serverVersion`; `git clone --depth 1 --branch v<version> https://github.com/pingdotgg/t3code /tmp/t3code-src`)
+  when you need a schema: `packages/contracts/src/orchestrationV2.ts` (commands, shell, projection, events),
+  `environmentHttp.ts` (HTTP routes), `rpc.ts` (WS methods), `scheduledTask.ts`. Event payloads live under
+  `event.payload`.
 - **Read-only scope by default.** Commands that mutate must call `connect(g, { write: true })` so the session
   upgrades to `orchestration:operate` automatically.
 - **Dispatch to the desktop backend**, never to the background service: two servers share the SQLite but not the
@@ -37,21 +46,22 @@ src/keychain.ts     macOS `security` wrapper
 src/http.ts         fetch client, read endpoints, dispatch()
 src/ws.ts           minimal Effect-RPC-over-WebSocket client (Request/Chunk/Ack/Exit frames)
 src/models.ts       provider catalog, alias + fuzzy model resolution, option validation
-src/wait.ts         wait-for-idle from the thread stream + shell polling
-src/pending.ts      derive open approval / user-input requests from activities
+src/wait.ts         threadStatus() from the V2 shell row; wait-for-idle from the thread stream + shell polling
+src/pending.ts      pending approvals / questions from projection.runtimeRequests + request turn items
 src/time.ts         "when" parser for snooze and one-shot schedules
-src/schedule.ts     job store (~/.config/t3ctl/schedule.json), cron evaluation (croner), grace/overlap rules, lock
-src/launchd.ts      LaunchAgent plist for `schedule tick` (label dev.t3ctl.scheduler)
+src/schedule.ts     schedule parsing/rendering, cron → T3 schedule conversion, legacy (≤0.4) job file reader for `schedule migrate`
+src/launchd.ts      removal of the legacy LaunchAgent (dev.t3ctl.scheduler) by `schedule migrate --apply`
 skills/t3ctl        agent skill; symlinked at ~/.claude/skills/t3ctl (edits are live immediately)
-test/*.test.ts      node:test unit tests (run with `pnpm test`); test/fixtures = recorded, scrubbed server payloads
+test/*.test.ts      node:test unit tests (run with `pnpm test`); test/fixtures = scrubbed V2 server payloads
 docs/*.md           user docs split by topic (commands, scheduler, models, auth, agents, architecture)
 docs/research       protocol notes from the upstream source
 ```
 
 ## Adding a command
 
-1. Find the `ClientOrchestrationCommand` variant or RPC in the contracts; note required fields (`commandId`,
-   `createdAt` where present are client-generated; use `uuid()` / `nowIso()` from `src/ids.ts`).
+1. Find the `OrchestrationV2Command` variant or RPC in the contracts; note required fields (`commandId`,
+   `messageId`, `threadId` are client-generated: `uuid()` from `src/ids.ts`; commands with creation fields take
+   `createdBy: "user"`, `creationSource: "server"`).
 2. Register it in the matching `src/commands/*.ts`. Accept `<ref>` = id, id prefix, or exact title via
    `matchThread` / `matchProject`. Emit with `emit(format, jsonValue, () => tableString)` so `-f json` and
    non-TTY output stay machine-readable.
@@ -61,19 +71,21 @@ docs/research       protocol notes from the upstream source
 
 ## Tests
 
-`pnpm test` runs `node --test` through tsx against fixtures in `test/fixtures/` (provider catalog, a scrubbed
-shell snapshot, activity logs with an approval and a user-input request). Pure logic is covered: `time`,
-`schedule` (grace/overlap/occurrence rules), `models` (alias + fuzzy resolution, option validation), `pending`,
-`threadStatus`, `matchThread`/`matchProject`, the guard and batch parsing. Nothing in `test/` talks to a real server.
+`pnpm test` runs `node --test` through tsx against fixtures in `test/fixtures/` (provider catalog, a scrubbed V2
+shell snapshot with one thread per derived status, a projection with a pending approval and a pending question).
+Pure logic is covered: `time`, `schedule` (duration/weekday/cron conversion, legacy job conversion), `models`
+(alias + fuzzy resolution, option validation), `pending`, `threadStatus`, `matchThread`/`matchProject`, the
+guard and batch parsing, `compatibility`/`assertCompatible`. Nothing in `test/` talks to a real server.
 
-When the server changes shape, re-record: unarchive one thread that had an approval and one that had an
-AskUserQuestion, then `pnpm record-fixtures <approvalRef> <userInputRef>`, re-archive them, and check the diff
-for anything personal before committing (the recorder replaces titles, paths, message text and tool arguments).
-Add a test whenever a live bug is fixed in one of the pure modules.
+When the server changes shape, re-record: find (or create, with `--runtime-mode approval-required`) a thread
+blocked on an approval or question, then `pnpm record-fixtures <thatThreadRef>`, and check the diff for anything
+personal before committing (the recorder replaces titles, paths, prompts and message text). Add a test whenever a
+live bug is fixed in one of the pure modules.
 
-`test/fake-server.ts` is an in-process stand-in (HTTP + Effect-RPC over `ws`) for the handful of endpoints
-`threads new` needs; `runCli` spawns the real CLI against it with `T3CTL_TOKEN` and a temp config dir. Use it for
-command wiring (flags, error JSON, exit codes), not as a protocol reference.
+`test/fake-server.ts` is an in-process stand-in (HTTP + Effect-RPC over `ws`) for the endpoints the commands
+need, including the protocol header/query-param checks and `scheduledTasks.*`; `runCli` spawns the real CLI
+against it with `T3CTL_TOKEN` and a temp config dir. Use it for command wiring (flags, error JSON, exit codes,
+the version gate via `fake.descriptor`), not as a protocol reference.
 
 ## Validating live
 
@@ -89,10 +101,10 @@ t3ctl threads wait "$id" --timeout 120
 t3ctl threads archive "$id"               # always clean up smoke threads
 ```
 
-Scheduler: `t3ctl schedule add 1m -p dev -m sonnet -e low "Reply with exactly OK."`, then either wait for the
-installed ticker (`tail ~/.config/t3ctl/scheduler.log`) or run `t3ctl schedule tick` by hand. To test the late
-path, backdate `nextAt` in `schedule.json`; to test overlap, schedule `* * * * *` against a thread whose turn runs
-longer than a minute. Remove test jobs afterwards (`schedule remove <id>`).
+Scheduler: `t3ctl schedule add --every 1h -p dev -m sonnet -e low -t "t3ctl e2e sched" "Reply with exactly OK."`,
+then `schedule show|disable|enable|update <id> --at 09:30 --days mon-fri|run|remove <id>`. `schedule run` starts
+a real (paid) run; archive the thread it creates. `schedule migrate` without `--apply` is read-only. Remove test
+tasks afterwards.
 
 Approval paths: create with `--runtime-mode approval-required` and a prompt that writes a file under `/tmp`;
 `threads pending` → `threads approve`. Guard paths: run the same `threads new` twice within a minute (second

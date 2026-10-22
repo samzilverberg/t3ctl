@@ -1,33 +1,39 @@
 import { Option, type Command } from "commander";
 import { readFileSync } from "node:fs";
 import { connect, withAuthRetry, type Ctx, type GlobalOpts } from "../context.js";
-import { api, dispatch, HttpError, type ShellProject, type ShellThread } from "../http.js";
+import { api, dispatch, rpc, type ShellProject, type ShellThread, type ThreadProjection } from "../http.js";
 import { ago, emit, renderTable, short } from "../output.js";
 import { RpcSocket } from "../ws.js";
-import { nowIso, uuid } from "../ids.js";
+import { uuid } from "../ids.js";
 import { createThread, createThreads, parseBatch, startTurn, matchThread, matchProject, effortOf, RUNTIME_MODES, INTERACTION_MODES, type RuntimeMode, type InteractionMode } from "../ops.js";
 import { parseWhen } from "../time.js";
 import { threadStatus, waitForIdle } from "../wait.js";
 import { MAX_BATCH, MIN_BATCH } from "../guard.js";
 import { intArg } from "../args.js";
-import { derivePendingApprovals, derivePendingUserInputs, type Activity } from "../pending.js";
+import { derivePendingApprovals, derivePendingUserInputs } from "../pending.js";
+import { CliError } from "../errors.js";
 
 const APPROVAL_DECISIONS = ["accept", "acceptForSession", "acceptAlways", "decline"] as const;
 
-/** Live shell snapshot, plus archived threads (and projects only they reference) from a separate RPC when asked. */
+/** Live shell snapshot, plus archived threads from `orchestration.getArchivedShellSnapshot` when asked (the HTTP shell leaves them out). */
 async function loadThreads(ctx: Ctx, g: GlobalOpts, includeArchived: boolean): Promise<{ threads: ShellThread[]; projects: ShellProject[] }> {
   const shell = await withAuthRetry(ctx, g, api.shell);
   if (!includeArchived) return shell;
-  const sock = new RpcSocket(ctx.server, ctx.client.token);
-  try {
-    const archived = await sock.request<{ threads: ShellThread[]; projects: ShellProject[] }>("orchestration.getArchivedShellSnapshot", {});
-    const seen = new Set(shell.threads.map((t) => t.id));
-    const seenP = new Set(shell.projects.map((p) => p.id));
-    return {
-      threads: [...shell.threads, ...archived.threads.filter((t) => !seen.has(t.id))],
-      projects: [...shell.projects, ...archived.projects.filter((p) => !seenP.has(p.id))],
-    };
-  } finally { sock.close(); }
+  const archived = await withAuthRetry(ctx, g, (c) => rpc<{ threads: ShellThread[]; projects: ShellProject[] }>(c, "orchestration.getArchivedShellSnapshot", {}));
+  const seen = new Set<string>();
+  const seenP = new Set(shell.projects.map((p) => p.id));
+  return {
+    // live rows first, then the shell's (usually empty) archivedThreads, then the archived snapshot; first occurrence wins
+    threads: [...shell.threads, ...(shell.archivedThreads ?? []), ...archived.threads].filter((t) => (seen.has(t.id) ? false : (seen.add(t.id), true))),
+    projects: [...shell.projects, ...archived.projects.filter((p) => !seenP.has(p.id))],
+  };
+}
+
+const APPROVAL_DECISIONS_ALLOWED = [...APPROVAL_DECISIONS, "cancel"] as const;
+
+/** Last `n` messages of a projection (user + assistant + system), oldest first. */
+function recentMessages(p: ThreadProjection, n: number) {
+  return [...p.messages].sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "")).slice(-n).map((m) => ({ id: m.id, role: m.role, text: m.text, runId: m.runId ?? null, createdAt: m.createdAt, streaming: m.streaming === true }));
 }
 
 export { matchThread, matchProject } from "../ops.js";
@@ -82,23 +88,24 @@ export function registerThreads(program: Command) {
   threads
     .command("show <ref>")
     .description("Show a thread with its recent messages")
-    .option("-n, --turns <n>", "number of turns to fetch", intArg, 5)
+    .option("-n, --messages <n>", "number of recent messages to print", intArg, 10)
     .addOption(new Option("-t <n>", "deprecated alias of -n").argParser(intArg).hideHelp())
-    .action(async (ref: string, o: { turns: number; t?: number }) => {
-      if (o.t !== undefined) o.turns = o.t;
+    .addOption(new Option("--turns <n>", "deprecated alias of -n").argParser(intArg).hideHelp())
+    .action(async (ref: string, o: { messages: number; t?: number; turns?: number }) => {
+      if (o.t !== undefined) o.messages = o.t;
+      if (o.turns !== undefined) o.messages = o.turns;
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g);
       const shell = await loadThreads(ctx, g, true);
       const t = matchThread(shell.threads, ref);
-      // Archived threads have no live detail endpoint (404); fall back to the archived shell row.
-      const detail = await api.thread(ctx.client, t.id, o.turns).catch((e: unknown) => {
-        if (e instanceof HttpError && e.status === 404 && t.archivedAt) return { snapshotSequence: -1, thread: { ...t, messages: [] }, page: null, note: "archived thread: messages not available via detail endpoint" };
-        throw e;
-      });
-      emit(ctx.format, { status: threadStatus(t), ...detail }, () => {
-        const th = detail.thread as Record<string, unknown> & { messages?: Array<Record<string, unknown>> };
-        const head = [`id       ${t.id}`, `title    ${t.title}`, `status   ${threadStatus(t)}`, `project  ${t.projectId}`, `branch   ${t.branch ?? ""}`, `worktree ${t.worktreePath ?? ""}`, `model    ${t.modelSelection?.instanceId ?? ""}/${t.modelSelection?.model ?? ""}${effortOf(t.modelSelection) ? "@" + effortOf(t.modelSelection) : ""}`, `mode     ${String(t.runtimeMode ?? "")}/${String(t.interactionMode ?? "")}`, ""];
-        const msgs = (th.messages ?? []).map((m) => `[${String(m.role ?? "?")}] ${String(m.text ?? JSON.stringify(m)).slice(0, 2000)}`);
+      const detail = await api.thread(ctx.client, t.id);
+      const p = detail.projection;
+      const messages = recentMessages(p, o.messages);
+      const latestRun = [...p.runs].sort((a, b) => a.ordinal - b.ordinal).at(-1) ?? null;
+      const out = { status: threadStatus(t), snapshotSequence: detail.snapshotSequence, thread: { ...p.thread, status: t.status, activeRunId: t.activeRunId, pendingRuntimeRequest: t.pendingRuntimeRequest ?? null }, latestRun, pendingRequests: p.runtimeRequests.filter((r) => r.status === "pending"), messages, messageCount: p.messages.length, runCount: p.runs.length };
+      emit(ctx.format, out, () => {
+        const head = [`id       ${t.id}`, `title    ${t.title}`, `status   ${threadStatus(t)}`, `project  ${t.projectId}`, `branch   ${t.branch ?? ""}`, `worktree ${t.worktreePath ?? ""}`, `model    ${t.modelSelection?.instanceId ?? ""}/${t.modelSelection?.model ?? ""}${effortOf(t.modelSelection) ? "@" + effortOf(t.modelSelection) : ""}`, `mode     ${String(t.runtimeMode ?? "")}/${String(t.interactionMode ?? "")}`, `runs     ${p.runs.length}  messages ${p.messages.length}`, ""];
+        const msgs = messages.map((m) => `[${m.role}${m.streaming ? "…" : ""}] ${m.text.slice(0, 2000)}`);
         return [...head, ...msgs].join("\n");
       });
     });
@@ -129,7 +136,7 @@ export function registerThreads(program: Command) {
       process.on("SIGINT", () => ac.abort());
       if (o.timeout) setTimeout(() => ac.abort(), o.timeout * 1000).unref();
       try {
-        for await (const item of sock.subscribe<unknown>("orchestration.subscribeThread", { threadId: t.id, turnLimit: 1, requestCompletionMarker: true }, ac.signal)) process.stdout.write(JSON.stringify(item) + "\n");
+        for await (const item of sock.subscribe<unknown>("orchestration.subscribeThread", { threadId: t.id, requestCompletionMarker: true }, ac.signal)) process.stdout.write(JSON.stringify(item) + "\n");
       } finally { sock.close(); }
     });
 
@@ -137,12 +144,13 @@ export function registerThreads(program: Command) {
     .command("wait <ref>")
     .description("Block until the thread's current turn finishes or it needs a human. Exit 0 idle, 2 needs-human, 3 error, 4 timeout, 5 aborted.")
     .option("--timeout <seconds>", "give up after N seconds", intArg, 1800)
-    .option("--require-turn", "wait for a turn to start even if the thread is idle now", false)
-    .action(async (ref: string, o: { timeout: number; requireTurn: boolean }) => {
+    .option("--require-run", "wait for a run to start even if the thread is idle now", false)
+    .addOption(new Option("--require-turn", "deprecated alias of --require-run").hideHelp())
+    .action(async (ref: string, o: { timeout: number; requireRun: boolean; requireTurn?: boolean }) => {
       const ctx = await connect(program.opts<GlobalOpts>());
       const shell = await api.shell(ctx.client);
       const t = matchThread(shell.threads, ref);
-      const out = await waitForIdle(ctx.server, ctx.client.token, t.id, { timeoutMs: o.timeout * 1000, requireTurnStart: o.requireTurn, poll: shellPoller(ctx.client, t.id) });
+      const out = await waitForIdle(ctx.server, ctx.client.token, t.id, { timeoutMs: o.timeout * 1000, requireRunStart: o.requireRun || o.requireTurn === true, poll: shellPoller(ctx.client, t.id) });
       emit(ctx.format, out, () => `${out.status} (${out.reason}) after ${out.events} events\n${out.lastAssistantText ? "\n" + out.lastAssistantText.slice(0, 3000) : ""}`);
       process.exitCode = exitCodeFor(out.reason);
     });
@@ -162,17 +170,16 @@ export function registerThreads(program: Command) {
     .option("--branch <name>", "worktree branch name (default: t3code/<hex>)")
     .option("--runtime-mode <mode>", `${RUNTIME_MODES.join("|")} (default: config defaults.runtimeMode, else auto)`)
     .option("--interaction-mode <mode>", `${INTERACTION_MODES.join("|")} (default: config defaults.interactionMode, else default)`)
-    .option("--no-setup-script", "skip the project setup script in the new worktree")
     .option("--stdin", STDIN_ALIAS, false)
     .option("--wait", "wait for the first turn to finish and print the result", false)
     .option("--timeout <seconds>", "with --wait", intArg, 1800)
     .option("--draft", "create the thread without sending a message (no agent turn starts)", false)
     .option("--snooze <when>", "hide the thread from the sidebar until <when> (ISO, 30m/2h/3d, HH:MM, \"tomorrow 09:00\"). Visibility only: a started turn keeps running.")
     .option("--batch <file>", `create ${MIN_BATCH}-${MAX_BATCH} threads: JSON array of prompts or {prompt,title?,model?,effort?,branch?} ('-' = stdin). Other flags apply to all. Skips the duplicate check against recent threads, not the rate limit.`)
-    .action(async (promptArg: string | undefined, o: { batch?: string; draft: boolean; snooze?: string; project: string; model?: string; effort?: string; contextWindow?: string; fast?: boolean; title?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; setupScript: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
+    .action(async (promptArg: string | undefined, o: { batch?: string; draft: boolean; snooze?: string; project: string; model?: string; effort?: string; contextWindow?: string; fast?: boolean; title?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; stdin: boolean; wait: boolean; timeout: number }) => {
       const g = program.opts<GlobalOpts>();
       if (o.draft && o.wait) throw new Error("--draft starts no turn, so there is nothing to --wait for");
-      const shared = { project: o.project, model: o.model, effort: o.effort, contextWindow: o.contextWindow, fast: o.fast, env: o.env, base: o.base, runtimeMode: o.runtimeMode, interactionMode: o.interactionMode, setupScript: o.setupScript, draft: o.draft, snooze: o.snooze };
+      const shared = { project: o.project, model: o.model, effort: o.effort, contextWindow: o.contextWindow, fast: o.fast, env: o.env, base: o.base, runtimeMode: o.runtimeMode, interactionMode: o.interactionMode, draft: o.draft, snooze: o.snooze };
       if (o.batch !== undefined) {
         const clash = [promptArg !== undefined && "a prompt argument", o.stdin && "--stdin", o.title && "-t", o.branch && "--branch", o.wait && "--wait"].filter(Boolean);
         if (clash.length) throw new Error(`--batch cannot be combined with ${clash.join(", ")} (set title/branch per item; wait with \`threads wait <id>\`)`);
@@ -190,7 +197,7 @@ export function registerThreads(program: Command) {
         emit(ctx.format, summary, () => `created ${threadId}${o.draft ? " (draft, no turn started)" : ""}\nproject  ${project}\ntitle    ${title}\nmodel    ${modelSelection.instanceId}/${modelSelection.model}${effortOf(modelSelection) ? "@" + effortOf(modelSelection) : ""}\nenv      ${summary.env}${summary.env === "worktree" ? ` (${summary.branch} from ${summary.baseBranch})` : ""}${snoozedUntil ? `\nsnoozed  until ${snoozedUntil}` : ""}`);
         return;
       }
-      const out = await waitForIdle(ctx.server, ctx.client.token, threadId, { timeoutMs: o.timeout * 1000, requireTurnStart: true, poll: shellPoller(ctx.client, threadId) });
+      const out = await waitForIdle(ctx.server, ctx.client.token, threadId, { timeoutMs: o.timeout * 1000, requireRunStart: true, poll: shellPoller(ctx.client, threadId) });
       emit(ctx.format, { ...summary, wait: out }, () => `created ${threadId}\n${out.status} (${out.reason})\n\n${out.lastAssistantText ?? ""}`);
       process.exitCode = exitCodeFor(out.reason);
     });
@@ -198,23 +205,26 @@ export function registerThreads(program: Command) {
   threads
     .command("send <ref>")
     .argument("[prompt]", PROMPT_ARG)
-    .description("Send a follow-up message to an existing thread (starts a turn)")
-    .option("-m, --model <ref>", "override model for this turn")
-    .option("-e, --effort <level>", "override effort for this turn")
-    .option("--runtime-mode <mode>", RUNTIME_MODES.join("|"))
-    .option("--interaction-mode <mode>", INTERACTION_MODES.join("|"))
+    .description("Send a follow-up message to an existing thread (starts a run). Refused while a run is active unless --queue or --steer.")
+    .option("-m, --model <ref>", "override model for this run (sticks to the thread)")
+    .option("-e, --effort <level>", "override effort for this run")
+    .option("--runtime-mode <mode>", `${RUNTIME_MODES.join("|")} (changes the thread setting)`)
+    .option("--interaction-mode <mode>", `${INTERACTION_MODES.join("|")} (changes the thread setting)`)
+    .option("--queue", "if a run is active, queue the message to run after it", false)
+    .option("--steer", "if a run is active, inject the message into it", false)
     .option("--stdin", STDIN_ALIAS, false)
-    .option("--wait", "wait for the turn to finish", false)
+    .option("--wait", "wait for the run to finish", false)
     .option("--timeout <seconds>", "with --wait", intArg, 1800)
-    .action(async (ref: string, promptArg: string | undefined, o: { model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; stdin: boolean; wait: boolean; timeout: number }) => {
+    .action(async (ref: string, promptArg: string | undefined, o: { model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; queue: boolean; steer: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
       const g = program.opts<GlobalOpts>();
+      if (o.queue && o.steer) throw new CliError("invalid_option", "pass --queue or --steer, not both", { option: "queue" });
       const ctx = await connect(g, { write: true });
       const text = readPrompt(promptArg, o);
       const shell = await withAuthRetry(ctx, g, api.shell);
       const t = matchThread(shell.threads, ref);
-      const res = await startTurn(ctx, g, t, { ...o, text });
-      if (!o.wait) { emit(ctx.format, { threadId: t.id, sequence: res.sequence }, () => `sent to ${t.id} (seq ${res.sequence})`); return; }
-      const out = await waitForIdle(ctx.server, ctx.client.token, t.id, { timeoutMs: o.timeout * 1000, requireTurnStart: true, poll: shellPoller(ctx.client, t.id) });
+      const res = await startTurn(ctx, g, t, { ...o, text, whenRunning: o.queue ? "queue" : o.steer ? "steer" : "refuse" });
+      if (!o.wait) { emit(ctx.format, { threadId: t.id, sequence: res.sequence, dispatchMode: res.dispatchMode }, () => `sent to ${t.id} (seq ${res.sequence}, ${res.dispatchMode})`); return; }
+      const out = await waitForIdle(ctx.server, ctx.client.token, t.id, { timeoutMs: o.timeout * 1000, requireRunStart: true, poll: shellPoller(ctx.client, t.id) });
       emit(ctx.format, { threadId: t.id, sequence: res.sequence, wait: out }, () => `${out.status} (${out.reason})\n\n${out.lastAssistantText ?? ""}`);
       process.exitCode = exitCodeFor(out.reason);
     });
@@ -226,12 +236,11 @@ export function registerThreads(program: Command) {
       const ctx = await connect(program.opts<GlobalOpts>());
       const shell = await api.shell(ctx.client);
       const t = matchThread(shell.threads, ref);
-      const detail = await api.thread(ctx.client, t.id, 3);
-      const acts = ((detail.thread as { activities?: Activity[] }).activities ?? []);
-      const out = { threadId: t.id, status: threadStatus(t), approvals: derivePendingApprovals(acts), userInputs: derivePendingUserInputs(acts) };
+      const detail = await api.thread(ctx.client, t.id);
+      const out = { threadId: t.id, status: threadStatus(t), approvals: derivePendingApprovals(detail.projection), userInputs: derivePendingUserInputs(detail.projection) };
       emit(ctx.format, out, () => {
         const lines = [`status ${out.status}`];
-        for (const a of out.approvals) lines.push(`approval ${a.requestId}  ${a.requestKind ?? a.requestType ?? ""}  ${a.detail ?? ""}  options: ${(a.options ?? []).map((o) => o.decision).join("|") || APPROVAL_DECISIONS.join("|")}`);
+        for (const a of out.approvals) lines.push(`approval ${a.requestId}  ${a.requestKind ?? ""}  ${(a.detail ?? "").split("\n")[0].slice(0, 120)}  options: ${(a.options ?? []).map((o) => o.decision).join("|") || APPROVAL_DECISIONS.join("|")}`);
         for (const u of out.userInputs) for (const q of u.questions) lines.push(`user-input ${u.requestId}  [${q.id}] ${q.question}  options: ${q.options.map((o) => o.label).join(" | ")}${q.multiSelect ? " (multi)" : ""}`);
         if (lines.length === 1) lines.push("(nothing pending)");
         return lines.join("\n");
@@ -241,20 +250,20 @@ export function registerThreads(program: Command) {
   threads
     .command("approve <ref>")
     .description("Respond to a pending approval request (default: the oldest one)")
-    .option("-d, --decision <d>", APPROVAL_DECISIONS.join("|"), "accept")
+    .option("-d, --decision <d>", APPROVAL_DECISIONS_ALLOWED.join("|"), "accept")
     .option("-r, --request <id>", "specific requestId (see `threads pending`)")
     .action(async (ref: string, o: { decision: string; request?: string }) => {
       const g = program.opts<GlobalOpts>();
-      if (!(APPROVAL_DECISIONS as readonly string[]).includes(o.decision)) throw new Error(`invalid decision. Allowed: ${APPROVAL_DECISIONS.join(", ")}`);
+      if (!(APPROVAL_DECISIONS_ALLOWED as readonly string[]).includes(o.decision)) throw new CliError("invalid_option", `invalid decision. Allowed: ${APPROVAL_DECISIONS_ALLOWED.join(", ")}`, { option: "decision", allowed: APPROVAL_DECISIONS_ALLOWED });
       const ctx = await connect(g, { write: true });
       const shell = await withAuthRetry(ctx, g, api.shell);
       const t = matchThread(shell.threads, ref);
-      const detail = await api.thread(ctx.client, t.id, 3);
-      const pending = derivePendingApprovals(((detail.thread as { activities?: Activity[] }).activities ?? []));
+      const detail = await api.thread(ctx.client, t.id);
+      const pending = derivePendingApprovals(detail.projection);
       const target = o.request ? pending.find((p) => p.requestId === o.request) : pending[0];
-      if (!target) throw new Error(o.request ? `no pending approval ${o.request}` : `thread ${short(t.id)} has no pending approvals`);
-      const res = await dispatch(ctx.client, { type: "thread.approval.respond", commandId: uuid(), threadId: t.id, requestId: target.requestId, decision: o.decision, createdAt: nowIso() });
-      emit(ctx.format, { threadId: t.id, requestId: target.requestId, decision: o.decision, sequence: res.sequence }, () => `${o.decision} → ${target.requestId} (${target.requestKind ?? ""} ${target.detail ?? ""})`);
+      if (!target) throw new CliError("nothing_pending", o.request ? `no pending approval ${o.request}` : `thread ${short(t.id)} has no pending approvals`, { threadId: t.id, requestId: o.request });
+      const res = await dispatch(ctx.client, { type: "runtime-request.respond", commandId: uuid(), threadId: t.id, requestId: target.requestId, decision: o.decision });
+      emit(ctx.format, { threadId: t.id, requestId: target.requestId, decision: o.decision, sequence: res.sequence }, () => `${o.decision} → ${target.requestId} (${target.requestKind ?? ""} ${(target.detail ?? "").split("\n")[0].slice(0, 80)})`);
     });
 
   threads
@@ -270,10 +279,10 @@ export function registerThreads(program: Command) {
       const ctx = await connect(g, { write: true });
       const shell = await withAuthRetry(ctx, g, api.shell);
       const t = matchThread(shell.threads, ref);
-      const detail = await api.thread(ctx.client, t.id, 3);
-      const pending = derivePendingUserInputs(((detail.thread as { activities?: Activity[] }).activities ?? []));
+      const detail = await api.thread(ctx.client, t.id);
+      const pending = derivePendingUserInputs(detail.projection);
       const target = o.request ? pending.find((p) => p.requestId === o.request) : pending[0];
-      if (!target) throw new Error(o.request ? `no pending user-input ${o.request}` : `thread ${short(t.id)} has no pending user-input requests`);
+      if (!target) throw new CliError("nothing_pending", o.request ? `no pending user-input ${o.request}` : `thread ${short(t.id)} has no pending user-input requests`, { threadId: t.id, requestId: o.request });
       let answers: Record<string, unknown> = {};
       if (o.json) answers = JSON.parse(o.json) as Record<string, unknown>;
       for (const kv of o.answer ?? []) {
@@ -285,7 +294,7 @@ export function registerThreads(program: Command) {
       }
       const missing = target.questions.filter((q) => !(q.id in answers));
       if (missing.length) throw new Error(`unanswered questions: ${missing.map((q) => `${q.id} (${q.options.map((x) => x.label).join(" | ")})`).join("; ")}`);
-      const res = await dispatch(ctx.client, { type: "thread.user-input.respond", commandId: uuid(), threadId: t.id, requestId: target.requestId, answers, createdAt: nowIso() });
+      const res = await dispatch(ctx.client, { type: "runtime-request.respond", commandId: uuid(), threadId: t.id, requestId: target.requestId, answers });
       emit(ctx.format, { threadId: t.id, requestId: target.requestId, answers, sequence: res.sequence }, () => `answered ${target.requestId}`);
     });
 
@@ -317,14 +326,15 @@ export function registerThreads(program: Command) {
 
   threads
     .command("interrupt <ref>")
-    .description("Interrupt the running turn")
+    .description("Interrupt the active run (thread.stop); queued messages stay queued")
     .action(async (ref: string) => {
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g, { write: true });
       const shell = await withAuthRetry(ctx, g, api.shell);
       const t = matchThread(shell.threads, ref);
-      const res = await dispatch(ctx.client, { type: "thread.turn.interrupt", commandId: uuid(), threadId: t.id, ...(t.session?.activeTurnId ? { turnId: t.session.activeTurnId } : {}), createdAt: nowIso() });
-      emit(ctx.format, { threadId: t.id, sequence: res.sequence }, () => `interrupt requested for ${t.id}`);
+      if (!t.activeRunId) throw new CliError("thread_idle", `thread ${short(t.id)} has no active run`, { threadId: t.id, status: threadStatus(t) });
+      const res = await dispatch(ctx.client, { type: "thread.stop", commandId: uuid(), threadId: t.id, reason: "t3ctl interrupt" });
+      emit(ctx.format, { threadId: t.id, runId: t.activeRunId, sequence: res.sequence }, () => `interrupt requested for ${t.id} (run ${t.activeRunId})`);
     });
 
   threads

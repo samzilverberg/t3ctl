@@ -81,7 +81,7 @@ test("parseBatch: strings and objects, 2..5 items, unknown keys, types", () => {
 let fake: Fake;
 before(async () => { fake = await startFake(); });
 after(async () => { await fake.close(); });
-beforeEach(() => { fake.threads.length = 0; fake.messages.clear(); fake.commands.length = 0; fake.failDispatch = undefined; });
+beforeEach(() => { fake.threads.length = 0; fake.messages.clear(); fake.commands.length = 0; fake.launches.length = 0; fake.failDispatch = undefined; });
 
 test("createThread guard: near-identical prompt 11 s after the first → duplicate_thread, nothing dispatched", async () => {
   const first = await createThread(fake.ctx, {}, { project: "dev", text: PROMPT_A }, { guard: true });

@@ -1,61 +1,48 @@
 /**
- * Client-side scheduler. T3 has no deferred start (snooze is visibility only), so jobs live in
- * ~/.config/t3ctl/schedule.json and a launchd ticker runs `t3ctl schedule tick` every minute.
- *
- * Rules (fixed, not configurable, to keep the surface small):
- *  - A job fires at most once per occurrence; missed occurrences are never replayed.
- *  - Late fire is allowed only within the grace window (default 60m, or half the cron interval if smaller).
- *  - Recurring jobs skip an occurrence while the thread of the previous run is still running / waiting on a human.
- *  - One-shots are kept in the file after firing (visible with `list -a`), recurring jobs keep their last 30 runs.
+ * `t3ctl schedule` is a thin client of T3 Code's own scheduler (0.1+): tasks live in the app's SQLite and are
+ * fired by the server (`scheduledTasks.*` RPCs, the same backend the desktop UI and the MCP `schedule_task` tool
+ * use). This module holds the pure parts: schedule parsing/rendering, cron → T3 schedule conversion, and reading
+ * the legacy client-side job file that pre-0.5 t3ctl kept for its launchd ticker (for `schedule migrate`).
  */
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
-import { Cron } from "croner";
 import { CONFIG_DIR } from "./config.js";
-import { parseWhen } from "./time.js";
 import { CliError } from "./errors.js";
-import type { RuntimeMode, InteractionMode } from "./ops.js";
 
-export const SCHEDULE_PATH = join(CONFIG_DIR, "schedule.json");
-export const LOCK_PATH = join(CONFIG_DIR, "schedule.lock");
-export const LOG_PATH = join(CONFIG_DIR, "scheduler.log");
+export type Schedule =
+  | { type: "interval"; everyMs: number }
+  | { type: "fixed_time"; timeOfDay: string; weekdays?: number[] }
+  | { type: "webhook"; signature: null | Record<string, unknown>; [k: string]: unknown };
 
-export interface Run { at: string; firedAt: string; status: "fired" | "skipped" | "failed"; threadId?: string; sequence?: number; reason?: string }
-
-export interface Job {
+/** `ScheduledTask` as returned by `scheduledTasks.list` (fields we render; the rest passes through). */
+export interface ScheduledTask {
   id: string;
+  title: string;
+  prompt: string;
+  enabled: boolean;
+  schedule: Schedule;
+  projectId: string;
+  threadId: string | null;
+  workspaceStrategy: Record<string, unknown>;
+  modelSelection: { instanceId: string; model: string; options?: Array<{ id: string; value: string | boolean }> };
+  runtimeMode: string;
+  interactionMode: string;
+  createdBy: string;
+  creationSource: string;
   createdAt: string;
-  /** Cron expression for recurring jobs; absent for one-shots. */
-  cron?: string;
-  /** Next scheduled occurrence (ISO). null when a one-shot has fired/skipped. */
-  nextAt: string | null;
-  graceSec: number;
-  /** New thread per occurrence … */
-  /** `project` is the resolved id (older jobs may hold the ref as typed); `projectTitle` is for display only. */
-  new?: { project: string; projectTitle?: string; text: string; model?: string; effort?: string; title?: string; env?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode };
-  /** … or a follow-up turn on an existing thread. */
-  send?: { thread: string; text: string; model?: string; effort?: string };
-  runs: Run[];
+  updatedAt: string;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastRunStatus: "never" | "running" | "succeeded" | "failed" | string;
+  lastRunError: string | null;
+  runCount: number;
+  webhook?: { path: string; url: string | null; hasSecret: boolean };
+  [k: string]: unknown;
 }
 
-interface Store { jobs: Job[] }
+export const MIN_INTERVAL_MS = 60_000;
 
-const MAX_RUNS = 30;
-
-export function readStore(): Store {
-  try { return JSON.parse(readFileSync(SCHEDULE_PATH, "utf8")) as Store; } catch { return { jobs: [] }; }
-}
-export function writeStore(s: Store): void {
-  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-  const tmp = `${SCHEDULE_PATH}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(s, null, 2) + "\n", { mode: 0o600 });
-  renameSync(tmp, SCHEDULE_PATH);
-}
-
-export const newJobId = () => randomBytes(4).toString("hex");
-
-/** Parse a duration like 30m / 2h / 1d into seconds. */
+/** Parse a duration like 30m / 2h / 1d into seconds (bare number = minutes). */
 export function parseDuration(s: string): number {
   const m = /^(\d+)\s*(s|m|min|h|hr|d)?$/.exec(s.trim().toLowerCase());
   if (!m) throw new CliError("invalid_option", `cannot parse duration "${s}" (use 30m, 2h, 1d)`, { input: s });
@@ -63,60 +50,133 @@ export function parseDuration(s: string): number {
   return n * (u === "s" ? 1 : u === "m" ? 60 : u === "h" ? 3600 : 86400);
 }
 
-function isCron(s: string): boolean {
-  const t = s.trim();
-  return t.startsWith("@") || t.split(/\s+/).length >= 5;
-}
+const DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const dayIndex = (s: string): number => {
+  const t = s.trim().toLowerCase();
+  if (/^\d$/.test(t)) { const n = Number(t); if (n <= 7) return n % 7; }
+  const i = DAY_NAMES.findIndex((d) => t.startsWith(d));
+  if (i < 0) throw new CliError("invalid_option", `unknown weekday "${s}" (use mon..sun or 0..6, 0 = Sunday)`, { input: s });
+  return i;
+};
 
-function cronOf(expr: string): Cron {
-  try { return new Cron(expr); } catch (e) { throw new Error(`invalid cron "${expr}": ${(e as Error).message}`); }
-}
-
-/** Interpret `<when>`: cron / @daily → recurring; otherwise a one-shot via parseWhen. */
-export function parseSchedule(when: string, now = new Date()): { cron?: string; nextAt: string; defaultGraceSec: number } {
-  if (isCron(when)) {
-    const c = cronOf(when);
-    const n1 = c.nextRun(now); const n2 = n1 ? c.nextRun(n1) : null;
-    if (!n1) throw new Error(`cron "${when}" never fires`);
-    const intervalSec = n2 ? (n2.getTime() - n1.getTime()) / 1000 : 3600;
-    return { cron: when.trim(), nextAt: n1.toISOString(), defaultGraceSec: Math.max(60, Math.min(3600, Math.floor(intervalSec / 2))) };
+/** `mon-fri`, `1-5`, `mon,wed,fri`, `weekdays`, `weekends`, `daily`/`*` → sorted weekday numbers (undefined = every day). */
+export function parseWeekdays(spec: string): number[] | undefined {
+  const s = spec.trim().toLowerCase();
+  if (s === "" || s === "*" || s === "daily" || s === "every" || s === "all") return undefined;
+  if (s === "weekdays") return [1, 2, 3, 4, 5];
+  if (s === "weekends") return [0, 6];
+  const out = new Set<number>();
+  for (const part of s.split(",")) {
+    const range = /^([^-]+)-([^-]+)$/.exec(part.trim());
+    if (range) {
+      const a = dayIndex(range[1]); const b = dayIndex(range[2]);
+      for (let d = a; ; d = (d + 1) % 7) { out.add(d); if (d === b) break; }
+    } else out.add(dayIndex(part));
   }
-  const nextAt = parseWhen(when, now);
-  if (Date.parse(nextAt) <= now.getTime()) throw new Error(`"${when}" is in the past`);
-  return { nextAt, defaultGraceSec: 3600 };
+  const days = [...out].sort((a, b) => a - b);
+  return days.length === 7 ? undefined : days;
+}
+
+export function parseTimeOfDay(s: string): string {
+  const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(s.trim());
+  if (!m) throw new CliError("invalid_option", `cannot parse time "${s}" (use HH:MM, 24-hour)`, { input: s });
+  return `${m[1].padStart(2, "0")}:${m[2]}`;
+}
+
+export function intervalSchedule(dur: string): Schedule {
+  const everyMs = parseDuration(dur) * 1000;
+  if (everyMs < MIN_INTERVAL_MS) throw new CliError("invalid_option", `interval must be at least 1m (got ${dur})`, { input: dur, minMs: MIN_INTERVAL_MS });
+  return { type: "interval", everyMs };
+}
+
+export function fixedTimeSchedule(time: string, days?: string): Schedule {
+  const weekdays = days === undefined ? undefined : parseWeekdays(days);
+  return { type: "fixed_time", timeOfDay: parseTimeOfDay(time), ...(weekdays ? { weekdays } : {}) };
 }
 
 /**
- * Decide what a job should do now. Returns the occurrence to act on (the most recent one due, never more than
- * one), whether it is inside grace, and the job's next occurrence after this one.
+ * Translate the subset of cron that T3 Code's scheduler can express:
+ *   `@hourly` / `@daily` / `@weekly` / `@weekdays`, `*\/N * * * *` and `0 *\/N * * *` → interval,
+ *   `M H * * D` → fixed daily time at H:M on weekdays D.
+ * Anything else (several hours, day-of-month, months, sub-minute) throws `cron_not_expressible`.
  */
-export function evaluate(job: Job, now = new Date()): { due: false } | { due: true; at: string; late: boolean; missed: number; nextAt: string | null } {
-  if (!job.nextAt) return { due: false };
-  let next = new Date(job.nextAt);
-  if (next.getTime() > now.getTime()) return { due: false };
-  if (!job.cron) return { due: true, at: job.nextAt, late: now.getTime() - next.getTime() > job.graceSec * 1000, missed: 0, nextAt: null };
-  const c = cronOf(job.cron);
-  let last = next; let missed = -1;
-  while (next.getTime() <= now.getTime()) { last = next; missed++; const n = c.nextRun(next); if (!n) break; next = n; }
-  const following = next.getTime() > now.getTime() ? next.toISOString() : null;
-  return { due: true, at: last.toISOString(), late: now.getTime() - last.getTime() > job.graceSec * 1000, missed, nextAt: following };
+export function cronToSchedule(expr: string): Schedule {
+  const e = expr.trim().toLowerCase();
+  const no = (why: string) => new CliError("cron_not_expressible", `cron "${expr}" cannot be expressed as a T3 Code schedule (${why}). T3 schedules are: every N minutes/hours, or a fixed daily time with optional weekdays.`, { cron: expr, reason: why });
+  if (e === "@hourly") return { type: "interval", everyMs: 3_600_000 };
+  if (e === "@daily" || e === "@midnight") return { type: "fixed_time", timeOfDay: "00:00" };
+  if (e === "@weekly") return { type: "fixed_time", timeOfDay: "00:00", weekdays: [0] };
+  if (e === "@weekdays") return { type: "fixed_time", timeOfDay: "00:00", weekdays: [1, 2, 3, 4, 5] };
+  if (e.startsWith("@")) throw no(`unsupported macro ${e}`);
+  const f = e.split(/\s+/);
+  if (f.length !== 5) throw no("expected 5 fields");
+  const [min, hour, dom, mon, dow] = f;
+  if (dom !== "*" || mon !== "*") throw no("day-of-month and month must be *");
+  let m = /^\*\/(\d+)$/.exec(min);
+  if (m && hour === "*" && dow === "*") return intervalSchedule(`${m[1]}m`);
+  m = /^\*\/(\d+)$/.exec(hour);
+  if (m && min === "0" && dow === "*") return intervalSchedule(`${m[1]}h`);
+  if (min === "*" || hour === "*") throw no("every-minute / every-hour forms other than */N are not supported");
+  if (!/^\d{1,2}$/.test(min) || !/^\d{1,2}$/.test(hour)) throw no("minute and hour must be single values");
+  const weekdays = dow === "*" ? undefined : parseWeekdays(dow.replace(/7/g, "0"));
+  return { type: "fixed_time", timeOfDay: parseTimeOfDay(`${hour}:${min.padStart(2, "0")}`), ...(weekdays ? { weekdays } : {}) };
 }
 
-export function recordRun(job: Job, run: Run): void {
-  job.runs.push(run);
-  if (job.runs.length > MAX_RUNS) job.runs.splice(0, job.runs.length - MAX_RUNS);
+export function describeSchedule(s: Schedule): string {
+  if (s.type === "interval") {
+    const sec = s.everyMs / 1000;
+    return `every ${sec % 86400 === 0 ? `${sec / 86400}d` : sec % 3600 === 0 ? `${sec / 3600}h` : sec % 60 === 0 ? `${sec / 60}m` : `${sec}s`}`;
+  }
+  if (s.type === "fixed_time") {
+    const days = s.weekdays === undefined ? "daily" : s.weekdays.length === 5 && s.weekdays.join() === "1,2,3,4,5" ? "weekdays" : s.weekdays.map((d) => DAY_NAMES[d]).join(",");
+    return `${days} ${s.timeOfDay}`;
+  }
+  if (s.type === "webhook") return "webhook";
+  return JSON.stringify(s);
 }
 
-/** Exclusive tick lock; a lock older than 10 minutes is considered stale and stolen. */
-export function acquireLock(): (() => void) | null {
-  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+export function matchTask(tasks: ScheduledTask[], ref: string): ScheduledTask {
+  if (!ref.trim()) throw new CliError("task_not_found", "empty task ref", { ref });
+  const t = tasks.find((x) => x.id === ref) ?? tasks.find((x) => x.id.startsWith(ref)) ?? tasks.find((x) => x.title === ref);
+  if (!t) throw new CliError("task_not_found", `scheduled task not found: ${ref}`, { ref, known: tasks.map((x) => ({ id: x.id, title: x.title })) });
+  return t;
+}
+
+// ---- Legacy client-side job file (t3ctl ≤ 0.4, launchd ticker) ----
+
+export const LEGACY_SCHEDULE_PATH = join(CONFIG_DIR, "schedule.json");
+export const LEGACY_LOG_PATH = join(CONFIG_DIR, "scheduler.log");
+
+export interface LegacyJob {
+  id: string;
+  createdAt: string;
+  cron?: string;
+  tz?: string;
+  nextAt: string | null;
+  graceSec: number;
+  new?: { project: string; projectTitle?: string; text: string; model?: string; effort?: string; title?: string; env?: string; runtimeMode?: string; interactionMode?: string };
+  send?: { thread: string; text: string; model?: string; effort?: string };
+  runs: Array<{ at: string; firedAt: string; status: string; threadId?: string; reason?: string }>;
+}
+
+export function readLegacyJobs(path = LEGACY_SCHEDULE_PATH): LegacyJob[] {
+  try { return (JSON.parse(readFileSync(path, "utf8")) as { jobs?: LegacyJob[] }).jobs ?? []; } catch { return []; }
+}
+
+export type LegacyConversion =
+  | { ok: true; job: LegacyJob; schedule: Schedule; title: string; prompt: string; note?: string }
+  | { ok: false; job: LegacyJob; reason: string };
+
+/** Pending recurring legacy jobs → T3 schedules. One-shots have no server equivalent and are reported as such. */
+export function convertLegacyJob(job: LegacyJob): LegacyConversion {
+  const prompt = job.new?.text ?? job.send?.text ?? "";
+  const title = job.new?.title ?? prompt.split("\n")[0].slice(0, 80) ?? "Scheduled task";
+  if (!job.nextAt) return { ok: false, job, reason: "already finished (one-shot that fired)" };
+  if (!job.cron) return { ok: false, job, reason: `one-shot at ${job.nextAt}: T3 Code has no one-shot schedules (start it yourself with threads new, or use --at HH:MM and remove the task after it runs)` };
   try {
-    if (existsSync(LOCK_PATH) && Date.now() - statSync(LOCK_PATH).mtimeMs > 10 * 60_000) unlinkSync(LOCK_PATH);
-    const fd = openSync(LOCK_PATH, "wx"); writeFileSync(fd, String(process.pid)); closeSync(fd);
-    return () => { try { unlinkSync(LOCK_PATH); } catch { /* ignore */ } };
-  } catch { return null; }
-}
-
-export function describeWhen(job: Job): string {
-  return job.cron ?? (job.nextAt ?? job.runs.at(-1)?.at ?? "");
+    const schedule = cronToSchedule(job.cron);
+    return { ok: true, job, schedule, title, prompt, ...(job.tz && job.tz.toUpperCase() !== "UTC" ? { note: `was pinned to ${job.tz}; T3 Code fixed times are in the server's local time zone` } : job.tz ? { note: "was pinned to UTC; T3 Code fixed times are in the server's local time zone" } : {}) };
+  } catch (e) {
+    return { ok: false, job, reason: e instanceof Error ? e.message : String(e) };
+  }
 }

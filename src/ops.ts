@@ -5,9 +5,9 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { withAuthRetry, type Ctx, type GlobalOpts } from "./context.js";
-import { api, dispatch, type ShellProject, type ShellThread } from "./http.js";
+import { api, dispatch, launchThread, type ShellProject, type ShellThread } from "./http.js";
 import { buildModelSelection, fetchConfig, fetchProviders, resolveModel, type ModelSelection, type ServerConfig } from "./models.js";
-import { nowIso, tempBranchName, uuid } from "./ids.js";
+import { tempBranchName, uuid } from "./ids.js";
 import { readConfig } from "./config.js";
 import { parseWhen } from "./time.js";
 import { threadStatus } from "./wait.js";
@@ -33,7 +33,6 @@ export interface NewThreadOpts {
   branch?: string;
   runtimeMode?: RuntimeMode;
   interactionMode?: InteractionMode;
-  setupScript?: boolean;
   draft?: boolean;
   snooze?: string;
 }
@@ -41,7 +40,7 @@ export interface NewThreadOpts {
 export interface NewThreadSummary {
   threadId: string; projectId: string; project: string; title: string; modelSelection: ModelSelection;
   runtimeMode: RuntimeMode; interactionMode: InteractionMode; env: string; branch: string | null; baseBranch: string | null;
-  draft: boolean; snoozedUntil: string | null; sequence: number; url: string;
+  draft: boolean; snoozedUntil: string | null; sequence: number | null; url: string;
 }
 
 export function matchThread(threads: ShellThread[], ref: string): ShellThread {
@@ -75,9 +74,9 @@ export function applyDefaults<T extends Pick<NewThreadOpts, "runtimeMode" | "int
   return { ...o, runtimeMode, interactionMode, model: o.model ?? d.model, effort: o.effort ?? d.effort, env: o.env ?? d.env };
 }
 
-/** `--env` value → worktree|local (default: server setting, else worktree). */
-export function envModeOf(env: string | undefined, settings: Record<string, unknown>): "worktree" | "local" {
-  const mode = (env ?? (settings.defaultThreadEnvMode as string | undefined) ?? "worktree").toLowerCase();
+/** `--env` value → worktree|local (default: project override, else server setting, else worktree). */
+export function envModeOf(env: string | undefined, settings: Record<string, unknown>, projectDefault?: string | null): "worktree" | "local" {
+  const mode = (env ?? projectDefault ?? (settings.defaultThreadEnvMode as string | undefined) ?? "worktree").toLowerCase();
   if (mode !== "worktree" && mode !== "local") throw new CliError("invalid_option", "--env must be worktree|local", { option: "env", allowed: ["worktree", "local"] });
   return mode;
 }
@@ -124,42 +123,37 @@ export async function createThread(ctx: Ctx, g: GlobalOpts, input: NewThreadOpts
   if (guard) await enforceGuard(ctx.client, shell.threads, project, { title, text });
   const { modelSelection, settings } = await resolveNewModel(ctx, project, o, config);
 
-  const envMode = envModeOf(o.env, settings);
+  const envMode = envModeOf(o.env, settings, project.defaultThreadEnvMode);
   const currentBranch = gitCurrentBranch(project.workspaceRoot);
-  const useWorktree = envMode === "worktree" && Boolean(currentBranch) && currentBranch !== "HEAD";
+  // Worktree threads need a base ref (the checkout's current branch unless --base). A detached HEAD or a non-git
+  // root cannot be the base, so they fall back to the project root ("local").
+  const useWorktree = envMode === "worktree" && Boolean(o.base ?? currentBranch) && currentBranch !== "HEAD";
   const baseBranch = o.base ?? currentBranch;
   const worktreeBranch = o.branch ?? tempBranchName();
   const startFromOrigin = settings.newWorktreesStartFromOrigin === true;
+  const workspaceStrategy = useWorktree
+    ? { type: "worktree", baseRef: baseBranch!, branch: worktreeBranch, ...(startFromOrigin ? { startFromOrigin: true } : {}) }
+    : { type: "root", ...(currentBranch && currentBranch !== "HEAD" ? { branch: currentBranch } : {}) };
 
   const threadId = uuid();
-  const createdAt = nowIso();
-  const createThreadPayload = { projectId: project.id, title, modelSelection, runtimeMode, interactionMode, branch: useWorktree ? worktreeBranch : (currentBranch ?? null), worktreePath: null, createdAt };
-  const command = draft
-    ? { type: "thread.create", commandId: uuid(), threadId, ...createThreadPayload }
-    : {
-      type: "thread.turn.start",
-      commandId: uuid(),
-      threadId,
-      message: { messageId: uuid(), role: "user", text, attachments: [] },
-      modelSelection,
-      runtimeMode,
-      interactionMode,
-      bootstrap: {
-        createThread: createThreadPayload,
-        ...(useWorktree && baseBranch ? { prepareWorktree: { projectCwd: project.workspaceRoot, baseBranch, branch: worktreeBranch, ...(startFromOrigin ? { startFromOrigin: true } : {}) }, runSetupScript: o.setupScript !== false } : {}),
-      },
-      createdAt,
-    };
-  const res = await withAuthRetry(ctx, g, (c) => dispatch(c, command));
+  let sequence: number | null = null;
+  if (draft) {
+    // A draft is a bare thread row: no run, so no workspace preparation either.
+    const res = await withAuthRetry(ctx, g, (c) => dispatch(c, { type: "thread.create", commandId: uuid(), threadId, projectId: project.id, title, modelSelection, runtimeMode, interactionMode, branch: currentBranch && currentBranch !== "HEAD" ? currentBranch : null, worktreePath: null, createdBy: "user", creationSource: "server" }));
+    sequence = res.sequence;
+  } else {
+    // launchThread = create + prepare workspace (worktree, setup script) + first run, atomically on the server.
+    await withAuthRetry(ctx, g, (c) => launchThread(c, { commandId: uuid(), threadId, projectId: project.id, title, modelSelection, runtimeMode, interactionMode, workspaceStrategy, creationSource: "server", initialMessage: { messageId: uuid(), text, attachments: [] } }));
+  }
   if (snoozedUntil) {
-    // The decider rejects snoozing a thread whose turn is still queued (not yet adopted by a session).
-    if (!draft) await waitForTurnAdopted(ctx, threadId, 60_000);
+    // The decider rejects snoozing a thread whose run is still being prepared/queued.
+    if (!draft) await waitForRunStarted(ctx, threadId, 60_000);
     await dispatch(ctx.client, { type: "thread.snooze", commandId: uuid(), threadId, snoozedUntil });
   }
   return {
     threadId, projectId: project.id, project: project.title, title, modelSelection, runtimeMode, interactionMode,
     env: useWorktree ? "worktree" : "local", branch: useWorktree ? worktreeBranch : (currentBranch ?? null),
-    baseBranch: useWorktree ? (baseBranch ?? null) : null, draft, snoozedUntil: snoozedUntil ?? null, sequence: res.sequence, url: `${ctx.server.origin}/thread/${threadId}`,
+    baseBranch: useWorktree ? (baseBranch ?? null) : null, draft, snoozedUntil: snoozedUntil ?? null, sequence, url: `${ctx.server.origin}/thread/${threadId}`,
   };
 }
 
@@ -234,47 +228,62 @@ export async function createThreads(ctx: Ctx, g: GlobalOpts, base: Omit<NewThrea
   return created;
 }
 
-export interface SendOpts { text: string; model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode }
+export interface SendOpts { text: string; model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; /** What to do when a run is active: refuse (default), queue after it, or steer it. */ whenRunning?: "refuse" | "queue" | "steer" }
 
 /** Model for a follow-up turn: the thread's own, or `model`/`effort` overrides validated against the catalog. */
 export async function resolveTurnModel(ctx: Ctx, t: ShellThread, o: Pick<SendOpts, "model" | "effort">): Promise<ModelSelection | undefined> {
   const current = t.modelSelection as ModelSelection | undefined;
-  if (!o.model && !o.effort) return current;
+  if (!o.model && !o.effort) return undefined;
   const providers = await fetchProviders(ctx.server, ctx.client.token);
   const resolved = resolveModel(providers, o.model ?? `${current?.instanceId}/${current?.model}`);
   const baseEffort = (current?.options ?? []).find((x) => x.id === "effort")?.value;
   return buildModelSelection(resolved, { effort: o.effort ?? (typeof baseEffort === "string" ? baseEffort : undefined) });
 }
 
-/** Start a follow-up turn on an existing (idle, non-archived) thread. */
-export async function startTurn(ctx: Ctx, g: GlobalOpts, t: ShellThread, o: SendOpts): Promise<{ threadId: string; sequence: number }> {
+/**
+ * Send a message to an existing, non-archived thread (`message.dispatch`). Idle thread → `start_immediately`.
+ * Running thread → refused unless `whenRunning` is `queue` (runs after the active run) or `steer` (injected into it).
+ */
+export async function startTurn(ctx: Ctx, g: GlobalOpts, t: ShellThread, o: SendOpts): Promise<{ threadId: string; sequence: number; dispatchMode: string }> {
   const status = threadStatus(t);
-  if (status === "running") throw new Error(`thread ${short(t.id)} is running; interrupt it or wait first`);
-  if (t.archivedAt) throw new Error(`thread ${short(t.id)} is archived`);
+  if (t.archivedAt) throw new CliError("thread_archived", `thread ${short(t.id)} is archived`, { threadId: t.id });
+  const running = status === "running" || status === "needs-approval" || status === "needs-input";
+  let dispatchMode: Record<string, unknown> = { type: "start_immediately" };
+  if (running) {
+    const when = o.whenRunning ?? "refuse";
+    if (when === "refuse") throw new CliError("thread_running", `thread ${short(t.id)} is ${status}; wait for it, or pass --queue / --steer`, { threadId: t.id, status });
+    if (when === "steer" && !t.activeRunId) throw new CliError("thread_running", `thread ${short(t.id)} has no active run to steer`, { threadId: t.id, status });
+    dispatchMode = when === "queue" ? { type: "queue_after_active" } : { type: "steer_active", targetRunId: t.activeRunId };
+  }
   const modelSelection = await resolveTurnModel(ctx, t, o);
   const command = {
-    type: "thread.turn.start",
+    type: "message.dispatch",
     commandId: uuid(),
     threadId: t.id,
-    message: { messageId: uuid(), role: "user", text: o.text, attachments: [] },
+    messageId: uuid(),
+    text: o.text,
+    attachments: [],
+    createdBy: "user",
+    creationSource: "server",
     ...(modelSelection ? { modelSelection } : {}),
-    runtimeMode: o.runtimeMode ?? (t.runtimeMode as RuntimeMode | undefined) ?? "full-access",
-    interactionMode: o.interactionMode ?? (t.interactionMode as InteractionMode | undefined) ?? "default",
-    createdAt: nowIso(),
+    dispatchMode,
   };
+  // runtimeMode / interactionMode are thread settings now, not per-message: apply overrides as separate commands first.
+  if (o.runtimeMode && o.runtimeMode !== t.runtimeMode) await withAuthRetry(ctx, g, (c) => dispatch(c, { type: "thread.runtime-mode.set", commandId: uuid(), threadId: t.id, runtimeMode: o.runtimeMode }));
+  if (o.interactionMode && o.interactionMode !== t.interactionMode) await withAuthRetry(ctx, g, (c) => dispatch(c, { type: "thread.interaction-mode.set", commandId: uuid(), threadId: t.id, interactionMode: o.interactionMode }));
   const res = await withAuthRetry(ctx, g, (c) => dispatch(c, command));
-  return { threadId: t.id, sequence: res.sequence };
+  return { threadId: t.id, sequence: res.sequence, dispatchMode: String(dispatchMode.type) };
 }
 
-/** Poll until the thread's first turn has been adopted by a provider session (or finished). */
-export async function waitForTurnAdopted(ctx: Ctx, threadId: string, timeoutMs: number): Promise<void> {
+/** Poll until the thread's run has left the preparing/queued phase (or finished). */
+export async function waitForRunStarted(ctx: Ctx, threadId: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const t = (await api.shell(ctx.client)).threads.find((x) => x.id === threadId);
-    if (t && (t.session?.activeTurnId || (t.latestTurn?.state && t.latestTurn.state !== "requested"))) return;
+    if (t && t.status !== undefined && t.status !== "preparing" && t.status !== "queued") return;
     await new Promise((r) => setTimeout(r, 1000));
   }
-  throw new Error("timed out waiting for the turn to be adopted; thread created but not snoozed");
+  throw new Error("timed out waiting for the run to start; thread created but not snoozed");
 }
 
 export function effortOf(ms?: { options?: Array<{ id: string; value: unknown }> }): string | undefined {

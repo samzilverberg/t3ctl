@@ -6,24 +6,29 @@ import { threadStatus } from "../src/wait.js";
 import { matchProject, matchThread } from "../src/ops.js";
 
 const shell = JSON.parse(readFileSync(new URL("./fixtures/shell.json", import.meta.url), "utf8")) as ShellSnapshot;
+const byTitle = Object.fromEntries(shell.threads.map((t) => [t.title, t]));
 
-test("threadStatus mirrors the UI heuristic", () => {
-  const byTitle = Object.fromEntries(shell.threads.map((t) => [t.title, t]));
-  assert.equal(threadStatus(byTitle["thread-0"]), "running");        // active turn
-  assert.equal(threadStatus(byTitle["thread-1"]), "idle");           // completed, no active turn
-  assert.equal(threadStatus(byTitle["thread-2"]), "needs-input");    // flag wins over running
+test("threadStatus derives from the V2 shell row: status, activeRunId, pendingRuntimeRequest", () => {
+  assert.equal(threadStatus(byTitle["thread-0"]), "running");          // activeRunId set, status running
+  assert.equal(threadStatus(byTitle["thread-1"]), "idle");             // status idle, no active run
+  assert.equal(threadStatus(byTitle["thread-2"]), "needs-input");      // pending user_input wins over the waiting run
+  assert.equal(threadStatus(byTitle["thread-3"]), "needs-approval");   // pending file-change request
+  assert.equal(threadStatus(byTitle["thread-4"]), "error");            // latest run failed
+  assert.equal(threadStatus(byTitle["thread-5"]), "interrupted");
+  assert.equal(threadStatus(byTitle["thread-6"]), "idle");             // never ran, but the server already says idle
   assert.equal(threadStatus({ ...byTitle["thread-1"], archivedAt: "2026-01-01T00:00:00Z" }), "archived");
-  assert.equal(threadStatus({ ...byTitle["thread-1"], hasPendingApprovals: true }), "needs-approval");
-  assert.equal(threadStatus({ ...byTitle["thread-1"], latestTurn: { state: "error" } }), "error");
-  assert.equal(threadStatus({ ...byTitle["thread-1"], latestTurn: { state: "interrupted" } }), "interrupted");
-  assert.equal(threadStatus({ id: "x", projectId: "p", title: "fresh" }), "new");
+  assert.equal(threadStatus({ ...byTitle["thread-1"], status: "completed" }), "idle");
+  for (const st of ["preparing", "queued", "starting", "waiting"]) assert.equal(threadStatus({ ...byTitle["thread-1"], status: st }), "running", st);
+  assert.equal(threadStatus({ ...byTitle["thread-1"], status: "cancelled" }), "interrupted");
+  assert.equal(threadStatus({ ...byTitle["thread-1"], pendingRuntimeRequest: { id: "x", kind: "permission" } }), "needs-approval");
+  assert.equal(threadStatus({ id: "x", projectId: "p", title: "fresh" }), "new");   // no status at all (draft row)
 });
 
-test("matchThread: id, id prefix, exact title", () => {
-  const t = shell.threads[1];
+test("matchThread: id, id prefix, exact title (ids are not always UUIDs any more)", () => {
+  const t = byTitle["thread-0"];
   assert.equal(matchThread(shell.threads, t.id).id, t.id);
-  assert.equal(matchThread(shell.threads, t.id.slice(0, 8)).id, t.id);
-  assert.equal(matchThread(shell.threads, "thread-1").id, t.id);
+  assert.equal(matchThread(shell.threads, "mcp:513352c3").id, t.id);
+  assert.equal(matchThread(shell.threads, "thread-1").id, byTitle["thread-1"].id);
   assert.throws(() => matchThread(shell.threads, "nope"), /thread not found/);
 });
 

@@ -1,93 +1,83 @@
 # How T3 Code is controlled
 
-What the upstream source (github.com/pingdotgg/t3code, tag `v0.0.38`) exposes and which parts t3ctl uses.
-Deeper notes: [research/](research/).
+What the upstream source (github.com/pingdotgg/t3code, tag `v0.1.1`) exposes and which parts t3ctl uses.
+Deeper notes: [research/](research/). **Minimum T3 Code version: 0.1.0** (orchestrator V2, protocol 2); the
+0.0.x alphas are refused with `incompatible_server`.
 
 ## Transports available
 
 | Transport | What it gives | Verdict |
 |---|---|---|
-| **HTTP API** (`/api/orchestration/*`, `/api/auth/*`, `/oauth/token`) | shell snapshot (projects + threads, no messages), full snapshot, thread detail with paginated messages, `POST /dispatch` for every write command | **Primary.** Enough for list/read/create/send. Stateless, trivial to call. |
-| **WebSocket Effect-RPC** (`GET /ws`, JSON frames) | everything HTTP has + streaming subscriptions (`subscribeShell`, `subscribeThread`), `searchThreads`, diffs, terminals, server config | **Needed only for live streams / wait-until-idle / search.** Small hand-rolled client (`src/ws.ts`, ~120 lines) is sufficient; no need to depend on `effect`. |
-| Direct SQLite (`~/.t3/userdata/state.sqlite`) | read projections, mint sessions | Rejected. Brittle across releases, bypasses the server's auth model. Only used indirectly via the official `t3 auth pairing create`. |
-| MCP `/mcp` | preview-browser tools only | Not useful for thread/project control. |
-| Existing `t3` CLI (`t3 project add/remove/rename`, `t3 auth …`) | project CRUD, token minting | No thread/message commands. We reuse `t3 auth pairing create` for pairing. |
+| **HTTP API** (`/api/orchestration/shell`, `/api/orchestration/threads/:id[/bounded|/history|/transcript]`, `/api/projects`, `/api/projects/mutate`, `/api/auth/*`, `/oauth/token`) | shell snapshot (projects + live threads), full thread projection (messages, runs, runtime requests, turn items), project CRUD | **Reads + project CRUD.** Every `/api/orchestration/*` request must carry `x-t3-orchestration-protocol: 2` (else 400). |
+| **WebSocket Effect-RPC** (`GET /ws?orchestrationProtocol=2`, JSON frames) | `orchestration.dispatchCommand`, `orchestration.launchThread`, `orchestration.subscribeThread`, `orchestration.searchThreads`, `orchestration.getArchivedShellSnapshot`, `server.getConfig`, `scheduledTasks.*` | **All writes, streams, search, scheduler.** Without the query param the upgrade is refused with 426 `orchestration_protocol_incompatible`. Small hand-rolled client (`src/ws.ts`). |
+| Direct SQLite (`~/.t3/userdata/statev2.sqlite`) | projections, scheduled_tasks, sessions | Rejected: brittle, bypasses auth. Only touched indirectly via the official `t3 auth pairing create`. |
+| MCP (`/mcp`) | the agent toolset (threads, scheduled tasks, previews) | Needs an MCP OAuth client; same backend as the RPCs we use directly. |
+| `t3` CLI (`~/.t3/bin/t3`, bundled in the app) | `t3 auth pairing create`, project commands | Used for pairing only. |
 
-So: **WS is not "the" way; HTTP is, with WS for streams.** Both are served by the same process and
-share auth.
+## Compatibility gate
+
+`/.well-known/t3/environment` reports `serverVersion` and (since 0.1.0) `orchestrationProtocolVersion`. `connect()`
+refuses anything below `MIN_SERVER_VERSION` (0.1.0), anything without a protocol version, and any protocol other
+than `SUPPORTED_PROTOCOL` (2) with `incompatible_server`, exit 7, before the first request. `t3ctl env` reports
+`supported` / `unsupportedReason` and exits 7 too; `t3ctl servers` marks unsupported servers. Constants live in
+`src/discover.ts`.
 
 ## Two servers on this machine, and which one t3ctl must use
 
-- **Desktop backend**: spawned by the Electron app on every launch (`t3 --mode desktop --bootstrap-fd 3`), dies with
-  the app. Advertises `serverSelfUpdate: desktop-managed`. The UI's WebSocket is connected to this one.
-- **Background service**: `t3 service install` registers a launchd agent that runs `t3 serve` at login. It hosts the
-  cloudflared T3 Connect tunnel for mobile/web. Advertises `serverSelfUpdate: boot-service`.
+- **Desktop backend**: spawned by the Electron app, dies with it, advertises `serverSelfUpdate: desktop-managed`.
+  The UI's WebSocket is connected to this one.
+- **Background service** (`t3 service install`, `t3 serve` at login): hosts the T3 Connect tunnel, advertises
+  `boot-service`.
 
-Both bind the first free port from 3773 upward, so which one owns 3773 depends on start order after a reboot.
-They share `~/.t3/userdata` (SQLite, signing key, sessions) but **not** an in-memory event bus: a command dispatched
-to one process is on disk instantly, yet the other process's live subscribers never hear about it. The desktop UI is
-a pure live-stream client, so dispatching to the service leaves the UI stale until it re-snapshots.
+Both bind the first free port from 3773 upward and share `~/.t3/userdata` but not an event bus, so a command
+dispatched to the service leaves the UI stale. Discovery probes 3773-3780 (plus `config.origin` and
+`server-runtime.json`) in parallel and prefers the desktop backend; the service is a fallback with a warning and
+`degraded: true` in `t3ctl env`. Never fall back on a timeout: the recorded origin is retried before settling.
 
-**Discovery therefore probes 3773-3780 (plus `config.origin` and `server-runtime.json`) in parallel and prefers the
-`desktop-managed` server.** The service is only a fallback (with a stderr warning). `--origin` / `T3CTL_ORIGIN` bypass
-discovery. `t3ctl servers` shows what is running. Tokens work on either process since they share the DB.
+## Read model (orchestrator V2)
 
-Two hardening rules on top of that preference:
-
-- **Never fall back on a timeout.** The parallel pass uses a 1.5s per-probe timeout, which the desktop backend can
-  miss under load. If that pass finds no `desktop-managed` server but `server-runtime.json` records an origin whose
-  pid is alive and that we did not reach, that origin is retried twice (4s timeout, 200ms/400ms backoff) before any
-  fallback is accepted. The happy path is untouched: a desktop backend that answers the first probe returns
-  immediately, and a runtime-state origin that answered as a non-desktop server is not retried.
-- **Say so in JSON.** Agents read stdout, not stderr, so the warning alone is invisible to them. `t3ctl env` reports
-  `isDesktopBackend` and `degraded` (`true` when the selected server is not the desktop backend, whatever the reason
-  — fallback or an explicit `--origin`). Agents should treat `degraded: true` as "writes will not show up live in the
-  UI" and stop, or re-target.
+- **Shell row** (`OrchestrationV2ThreadShell`): `status` is `idle` or the active/latest run's status
+  (`preparing|queued|starting|running|waiting|completed|interrupted|failed|cancelled|rolled_back`), `activeRunId`,
+  `pendingRuntimeRequest {id, kind, blocking}` while a run waits on a human, `latestVisibleMessage`, plus
+  `archivedAt/settledAt/snoozedUntil`. `threadStatus()` in `src/wait.ts` maps that to t3ctl's `running | idle |
+  needs-approval | needs-input | error | interrupted | archived | new`. Thread ids are not always UUIDs
+  (`mcp:<uuid>`, `thread:provider:…`).
+- **Projection** (`GET /api/orchestration/threads/:id` → `{snapshotSequence, projection}`): `thread`, `runs`,
+  `runtimeRequests` (first-class pending approvals/questions), `messages` (`role`, `text`, `runId`), `turnItems`
+  (`approval_request` / `user_input_request` carry the prompt, options and questions for a `requestId`).
+  `threads pending` joins `runtimeRequests[status=pending]` with those turn items.
+- Archived threads are not in the HTTP shell; `orchestration.getArchivedShellSnapshot` returns them.
 
 ## Write surface
 
-All writes are a `ClientOrchestrationCommand` sent through the WebSocket RPC
-`orchestration.dispatchCommand`. **Not** `POST /api/orchestration/dispatch`: only the WS handler implements
-the `thread.turn.start` bootstrap (create thread, prepare worktree, run setup script); the HTTP route hands
-bootstrap to the engine and fails with `orchestration_dispatch_failed`. Commands
-(client generates `commandId`, `threadId`, `messageId` UUIDs + `createdAt`):
+- **Create + first run**: `orchestration.launchThread {commandId, threadId?, projectId, title, modelSelection,
+  runtimeMode, interactionMode, workspaceStrategy, initialMessage}`. `workspaceStrategy` is `{type:"root",
+  branch?}`, `{type:"worktree", baseRef, branch?, startFromOrigin?}` or `{type:"existing_worktree", worktreePath}`;
+  the server prepares the worktree and runs the setup script (no client flag). Returns `{threadId, projection}`.
+- **Everything else** is an `OrchestrationV2Command` through `orchestration.dispatchCommand` → `{sequence}`:
+  `thread.create` (draft), `message.dispatch {messageId, text, attachments, dispatchMode: start_immediately |
+  queue_after_active | steer_active{targetRunId} | restart_active | defer_start}`, `runtime-request.respond
+  {requestId, decision | answers}`, `thread.stop`, `thread.archive/unarchive/settle/unsettle/snooze/unsnooze`,
+  `thread.runtime-mode.set`, `thread.interaction-mode.set`. Commands carry `createdBy: "user"`,
+  `creationSource: "server"` where the schema has creation fields.
+- **Projects**: `POST /api/projects/mutate` with `project.create | project.update | project.delete`.
+- **Scheduler**: `scheduledTasks.list | upsert | setEnabled | delete | runNow` (`upsert` with `id` +
+  `requireExisting` edits). See [scheduler.md](scheduler.md).
 
-- `project.create`, `project.meta.update`, `project.delete`
-- `thread.create`, `thread.turn.start` (send message; `bootstrap.createThread` + `prepareWorktree`
-  create-and-send atomically), `thread.turn.interrupt`, `thread.approval.respond`,
-  `thread.user-input.respond`, `thread.archive/unarchive/delete/settle/snooze/pin/meta.update`,
-  `thread.runtime-mode.set`, `thread.interaction-mode.set`, `thread.session.stop`.
-
-Response is `{sequence}`. "Idle" is derived, not an RPC. `threads wait` subscribes to the thread stream and
-treats `thread.session-set` with `activeTurnId: null` (after having seen a turn) as the end of the turn; event
-payloads live under `event.payload`. `hasPendingApprovals` / `hasPendingUserInput` are shell-row flags, not
-thread-stream events, so `wait` polls the shell snapshot every 5 s on the side. Archived threads are not in
-the live shell snapshot; `orchestration.getArchivedShellSnapshot` returns them, and their detail endpoint 404s.
-
-## Pending approvals
-
-Not a first-class field. Like the web client (`apps/web/src/session-logic.ts`), t3ctl derives them from
-`thread.activities`: an `approval.requested` / `user-input.requested` activity whose `payload.requestId` has no
-later `*.resolved` activity is open. `threads wait` reports `needs-human` from the shell flags
-`hasPendingApprovals` / `hasPendingUserInput` (polled), then `threads pending` lists the request ids.
+"Idle" is derived, not an RPC. `threads wait` subscribes to `orchestration.subscribeThread` and ends on a
+terminal `run.updated` (`completed|failed|interrupted|cancelled`) after having seen an active run, or on a
+pending `runtime-request.updated`; `message.updated` events supply `lastAssistantText`. The shell row is polled
+every 5 s as a safety net.
 
 ## Caveats
 
-- Protocol is internal and unversioned; check `serverVersion` from `/.well-known/t3/environment`
-  after T3 Code updates. Types in `src/http.ts` are intentionally loose.
-- `t3 auth pairing create` uses Node's experimental SQLite; it prints a warning on stderr (suppressed).
+- Types in `src/http.ts` are intentionally loose; re-check against the contracts after each T3 Code release
+  (`git clone --depth 1 --branch v<serverVersion> https://github.com/pingdotgg/t3code /tmp/t3code-src`).
+- `t3 auth pairing create` prints Node warnings on stderr (suppressed).
 - Keychain access via `security` may prompt once per new terminal binary.
 
 ## Reference CLIs (studied, not used)
 
-- **tarik02-org/t3code-cli** — broadest; Effect v4 + vendored upstream contracts; pairing or direct
-  SQLite session mint; encrypted config + OS keyring; agent-first `--format auto`, ndjson streams,
-  `wait`, `ask`, `callback`, self-action guard, ships a SKILL.md. Cost: tracks a fast-moving upstream.
-- **MajesteitBart/t3code-cli** — HTTP only; shells out to `t3 auth session issue --ttl 2m` per run and
-  revokes after; one `handover` workflow. Nice: `doctor`, version-gated defaults.
-- **@shivamhwp/t3code-sdk** — HTTP + WS hybrid; best reconnect/resume-from-sequence logic; README says
-  "do not use".
-
-Borrowed: HTTP-first + WS-for-streams split, agent-aware output default, read-only scope by default,
-derived idle heuristic, SKILL.md. Avoided: `effect` dependency, direct DB writes, vendoring contracts
-(we type only what we render).
+- **tarik02-org/t3code-cli**, **MajesteitBart/t3code-cli**, **@shivamhwp/t3code-sdk**: all written against the
+  V1 alphas. Borrowed ideas: HTTP-first + WS-for-streams split, agent-aware output default, read-only scope by
+  default, derived idle heuristic, SKILL.md. Avoided: an `effect` dependency, direct DB writes, vendoring contracts.

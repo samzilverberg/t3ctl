@@ -25,4 +25,4 @@ pair them by convention rather than code:
   Absent → project default.
 - **Progress**: `t3ctl threads -i <ids>` for a batch status report, `threads show <id> -n 1` for the latest
   assistant message, `threads wait <id>` (exit code) for blocking flows, `threads -s needs-approval` for a
-  "needs me" view. `schedule add` covers deferred and recurring tasks without any tracker.
+  "needs me" view. `schedule add` covers recurring tasks (T3 Code's own scheduler) without any tracker.

@@ -4,8 +4,8 @@ Every command prints JSON when stdout is not a TTY or `T3CTL_AGENT=1`, a table o
 `<ref>` is an id, an id prefix, or an exact title (projects also accept their workspace root).
 
 ```
-t3ctl env                                  # which server we target (no auth); JSON adds isDesktopBackend + degraded
-t3ctl servers                              # every running T3 server on 127.0.0.1:3773-3780
+t3ctl env                                  # which server we target (no auth); JSON adds isDesktopBackend, degraded, supported
+t3ctl servers                              # every running T3 server on 127.0.0.1:3773-3780 (unsupported ones marked)
 t3ctl auth pair [--operate] | status | forget
 t3ctl models [-a] [--no-legacy]            # models per provider + allowed effort / context-window values
 t3ctl projects [list|show <ref>]
@@ -14,40 +14,50 @@ t3ctl projects remove <ref> [--force]
 
 t3ctl threads [list] [-p project] [-s status] [-a] [-n N]
 t3ctl threads -i <id,id,…>                                   # status report for known ids
-t3ctl threads show <ref> [-n turns]
+t3ctl threads show <ref> [-n messages]
 t3ctl threads search <query>
 t3ctl threads watch <ref> [--timeout s]                      # raw NDJSON event stream
-t3ctl threads wait <ref> [--timeout s] [--require-turn]      # exit 0 idle · 2 needs-human · 3 error · 4 timeout
+t3ctl threads wait <ref> [--timeout s] [--require-run]       # exit 0 idle · 2 needs-human · 3 error · 4 timeout
 t3ctl threads new  -p <project> [-m model] [-e effort] [--context-window 1m] [--fast]
                    [-t title] [--env worktree|local] [--base br] [--branch br]
-                   [--runtime-mode …] [--interaction-mode default|plan] [--no-setup-script]
+                   [--runtime-mode …] [--interaction-mode default|plan]
                    [--wait] "<prompt>" | -                   # - reads the prompt from stdin
 t3ctl threads new -p <project> [shared flags] --batch <file|->   # 2-5 related threads in one call
 t3ctl threads new … --draft [--snooze <when>]                # create without starting a turn
-t3ctl threads send <ref> [-m model] [-e effort] [--wait] "<prompt>"
+t3ctl threads send <ref> [-m model] [-e effort] [--queue|--steer] [--wait] "<prompt>"
 t3ctl threads pending <ref>                                  # open approval / user-input requests
-t3ctl threads approve <ref> [-d accept|acceptForSession|acceptAlways|decline] [-r requestId]
+t3ctl threads approve <ref> [-d accept|acceptForSession|acceptAlways|decline|cancel] [-r requestId]
 t3ctl threads respond <ref> --answer <questionId>=<answer> … | --json '{…}'
 t3ctl threads snooze <ref> -u <when> | unsnooze <ref>        # sidebar visibility only
 t3ctl threads settle|unsettle <ref>
 t3ctl threads interrupt|archive|unarchive <ref>
 
-t3ctl schedule add <when> -p <project> [-m model] [-e effort] [-t title] [--env …] [--grace 30m] "<prompt>"
-t3ctl schedule add <when> --thread <ref> [-m model] [-e effort] "<prompt>"
-t3ctl schedule [list] [-a] | remove <id> | tick | install | uninstall
+t3ctl schedule add (--every <dur> | --at HH:MM [--days spec] | --cron <expr> | --webhook)
+                   -p <project> | --thread <ref> [-m model] [-e effort] [-t title] [--env …] [--disabled] "<prompt>"
+t3ctl schedule [list] [-p project] | show <ref> | update <ref> [flags] [prompt] | enable|disable <ref> | run <ref> | remove <ref>
+t3ctl schedule migrate [--apply]                             # legacy ≤0.4 launchd jobs → T3 Code tasks
 ```
 
 Global flags: `--origin <url>` (skip discovery; also `T3CTL_ORIGIN`), `-f json|table`, `--no-auto-pair`.
 `T3CTL_TOKEN` overrides the Keychain. `T3CTL_CONFIG_DIR` relocates `~/.config/t3ctl`.
 
-`<when>` = ISO, `30m`/`2h`/`3d`/`1w`, `HH:MM` (today, else tomorrow), or `"tomorrow [HH:MM]"` (default 09:00).
-For `schedule add` it may also be a cron expression; see [scheduler.md](scheduler.md).
+`<when>` (snooze) = ISO, `30m`/`2h`/`3d`/`1w`, `HH:MM` (today, else tomorrow), or `"tomorrow [HH:MM]"` (default 09:00).
+Schedules are T3 Code's: interval, fixed daily time (+weekdays) or webhook; see [scheduler.md](scheduler.md).
+
+## Supported T3 Code versions
+
+t3ctl 0.5+ talks orchestrator V2 only: **T3 Code ≥ 0.1.0**, orchestration protocol 2. Every command that
+contacts the server first reads `/.well-known/t3/environment` and refuses with `incompatible_server` (exit 7)
+when `serverVersion` < 0.1.0, when no `orchestrationProtocolVersion` is reported (the 0.0.x alphas), or when the
+protocol is not 2 (a future T3 Code: update t3ctl). `t3ctl env` prints `supported` / `unsupportedReason`
+instead of failing outright, but also exits 7. Constants: `MIN_SERVER_VERSION`, `SUPPORTED_PROTOCOL` in
+`src/discover.ts`.
 
 ## Exit codes
 
-`threads wait` (and `new --wait` / `send --wait`): `0` idle, `2` needs a human (approval or question), `3` turn
-errored, `4` timeout, `5` aborted. `threads new` refused by the duplicate / rate-limit guard: `6`. Everything
-else: `0` success, `1` error.
+`threads wait` (and `new --wait` / `send --wait`): `0` idle, `2` needs a human (approval or question), `3` run
+errored, `4` timeout, `5` aborted. `threads new` refused by the duplicate / rate-limit guard: `6`. Server too old
+or speaking another protocol: `7`. Everything else: `0` success, `1` error.
 
 ## Errors
 
@@ -63,6 +73,9 @@ printed on stdout as `{"error": {"code", "message", …details}}`:
 | `thread_not_found` / `project_not_found` | 1 | `ref` (`known` titles for projects) |
 | `model_unknown` / `invalid_option` | 1 | `ref` / `option`, `allowed` or `input` for times and durations (plus `index` inside a batch) |
 | `no_server` | 1 | `origin` or `probed` |
+| `incompatible_server` | 7 | `origin`, `serverVersion`, `orchestrationProtocolVersion`, `minServerVersion`, `supportedProtocol` |
+| `thread_running` / `thread_idle` / `thread_archived` / `nothing_pending` | 1 | `threadId`, `status` (`send` without `--queue`/`--steer`, `interrupt` with no run, …) |
+| `task_not_found` / `cron_not_expressible` / `removed_command` | 1 | `ref` + `known` / `cron`, `reason` / `command` (scheduler) |
 | `auth` | 1 | not paired / token rejected / pairing failed (`status` when the server answered) |
 | `http_error` / `rpc_error` | 1 | `status`, `path` / `rpc` (server refused a request, e.g. 403 on a read-only token) |
 | `usage` | 1 | `commanderCode` (bad or missing flag/argument, non-numeric count/seconds; commander prints usage on stderr) |
@@ -73,18 +86,21 @@ alias on `new` and `send`.
 
 ## Thread status values
 
-Derived the same way the UI does it: `running`, `idle`, `needs-approval`, `needs-input`, `error`, `interrupted`,
-`archived`, `new`. `hasPendingApprovals` / `hasPendingUserInput` flags win over "running".
+Derived from the V2 shell row: `running` (an active run: preparing, queued, starting, running, waiting), `idle`
+(no active run; latest run completed), `needs-approval` / `needs-input` (a pending runtime request: command,
+file-change, permission, … / a question; wins over running), `error` (latest run failed), `interrupted`
+(interrupted or cancelled), `archived`, `new` (never ran).
 
 ## Thread creation defaults
 
 - **Model**: `--model` → config `defaults.model` → project `defaultModelSelection` → server `textGenerationModelSelection`.
   `--effort` / `--context-window` / `--fast` are validated against the model's option descriptors from
   `server.getConfig` (`t3ctl models` prints them; `*` marks defaults).
-- **Env**: `--env` → server `defaultThreadEnvMode` (yours: `worktree`). Worktree mode needs the project root to
-  be a git checkout; base branch = `--base` or the checkout's current branch; worktree branch = `--branch` or
-  `t3code/<hex>` like the desktop; `newWorktreesStartFromOrigin` is honoured; setup script runs unless
-  `--no-setup-script`. Non-git roots fall back to `local`.
+- **Env**: `--env` → project `defaultThreadEnvMode` → server `defaultThreadEnvMode` → `worktree`. Worktree mode
+  needs the project root to be a git checkout; base = `--base` or the checkout's current branch; worktree branch =
+  `--branch` or `t3code/<hex>`; `newWorktreesStartFromOrigin` is honoured. The server prepares the worktree and
+  runs the project setup script (`orchestration.launchThread`); there is no client-side opt-out any more. Non-git
+  roots fall back to `local` (the project root).
 - **Modes**: `--runtime-mode` (default `auto`, or `defaults.runtimeMode`) and `--interaction-mode default|plan`.
 
 ## Duplicate and rate-limit guard
@@ -150,7 +166,14 @@ the usual `threads new` summaries.
 
 ## Snooze is not scheduling
 
-T3's `thread.snooze` only hides the thread from the sidebar until `snoozedUntil` (the decider comment: "snooze
-only affects visibility, never the agent"). A running turn keeps running; a draft stays a draft. The server
-rejects snoozing a thread with a pending approval/user-input or a still-queued turn, so `new --snooze` waits for
-the turn to be adopted before snoozing. There is no server-side deferred start; that is what `t3ctl schedule` is for.
+T3's `thread.snooze` only hides the thread from the sidebar until `snoozedUntil`. A running run keeps running; a
+draft stays a draft. The server rejects snoozing a thread whose run is still being prepared, so `new --snooze`
+waits for the run to start before snoozing. Recurring work belongs in `t3ctl schedule` (T3 Code's scheduler);
+there is no server-side deferred single start.
+
+## Sending to a busy thread
+
+`threads send` refuses (`thread_running`, exit 1) while the thread has an active run or a pending request. Pass
+`--queue` to run the message after the active run (`queue_after_active`) or `--steer` to inject it into the
+active run (`steer_active`). `-m`/`-e` change the thread's model for this and later runs; `--runtime-mode` /
+`--interaction-mode` change the thread's settings before sending.

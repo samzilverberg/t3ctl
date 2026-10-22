@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import type { Server } from "./discover.js";
+import { SUPPORTED_PROTOCOL } from "./discover.js";
 
 /**
  * Minimal client for Effect RPC (effect@4 `unstable/rpc`) over WebSocket with JSON serialization,
@@ -29,6 +30,8 @@ export class RpcSocket {
   constructor(server: Server, token: string, clientSurface = "cli") {
     const url = new URL("/ws", server.origin);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    // Without this the 0.1+ server answers the upgrade with 426 orchestration_protocol_incompatible.
+    url.searchParams.set("orchestrationProtocol", String(SUPPORTED_PROTOCOL));
     url.searchParams.set("clientSurface", clientSurface);
     url.searchParams.set("clientDeviceType", "desktop");
     url.searchParams.set("clientOs", process.platform);

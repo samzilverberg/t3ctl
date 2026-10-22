@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { discoverServer, isDesktopBackend, type DiscoveryDeps, type EnvironmentDescriptor } from "../src/discover.js";
+import { assertCompatible, compareVersions, compatibility, discoverServer, isDesktopBackend, INCOMPATIBLE_EXIT, MIN_SERVER_VERSION, type DiscoveryDeps, type EnvironmentDescriptor } from "../src/discover.js";
+import { CliError } from "../src/errors.js";
 
 delete process.env.T3CTL_ORIGIN;   // discovery must be driven by the injected deps only
 
@@ -11,7 +12,8 @@ const descriptor = (selfUpdate: string): EnvironmentDescriptor => ({
   environmentId: `env-${selfUpdate}`,
   label: selfUpdate,
   platform: { os: "darwin", arch: "arm64" },
-  serverVersion: "1.2.3",
+  serverVersion: "0.1.1",
+  orchestrationProtocolVersion: 2,
   capabilities: { serverSelfUpdate: selfUpdate, orchestration: true },
 });
 
@@ -130,4 +132,43 @@ test("config.origin is probed and can be the desktop backend", async () => {
   assert.equal(s.origin, cfg);
   assert.equal(s.source, "config");
   assert.equal(s.degraded, false);
+});
+
+test("compareVersions orders numeric cores and ignores prerelease tags", () => {
+  assert.equal(compareVersions("0.0.44", "0.1.0"), -1);
+  assert.equal(compareVersions("0.1.0", "0.1.0"), 0);
+  assert.equal(compareVersions("0.1.1", "0.1.0"), 1);
+  assert.equal(compareVersions("0.10.0", "0.9.9"), 1);
+  assert.equal(compareVersions("v0.1.1-nightly.3", "0.1.1"), 0);
+  assert.equal(compareVersions("1.0", "0.99.99"), 1);
+});
+
+test(`compatibility: ≥ ${MIN_SERVER_VERSION} with orchestration protocol 2 only`, () => {
+  assert.deepEqual(compatibility(desktopDescriptor), { ok: true });
+  assert.deepEqual(compatibility({ ...desktopDescriptor, serverVersion: "0.1.0" }), { ok: true });
+  assert.deepEqual(compatibility({ ...desktopDescriptor, serverVersion: "0.2.0-nightly.1" }), { ok: true });
+  const alpha = compatibility({ ...desktopDescriptor, serverVersion: "0.0.44", orchestrationProtocolVersion: undefined });
+  assert.equal(alpha.ok, false); assert.match(alpha.reason ?? "", /0\.0\.44 is older than the minimum 0\.1\.0/);
+  const noProto = compatibility({ ...desktopDescriptor, orchestrationProtocolVersion: undefined });
+  assert.equal(noProto.ok, false); assert.match(noProto.reason ?? "", /no orchestration protocol version/);
+  const future = compatibility({ ...desktopDescriptor, serverVersion: "0.3.0", orchestrationProtocolVersion: 3 });
+  assert.equal(future.ok, false); assert.match(future.reason ?? "", /protocol 3; this t3ctl supports 2/);
+  const junk = compatibility({ ...desktopDescriptor, serverVersion: "" });
+  assert.equal(junk.ok, false); assert.match(junk.reason ?? "", /did not report a version/);
+});
+
+test("assertCompatible throws incompatible_server (exit 7) with structured details", async () => {
+  const server = await discoverServer(undefined, deps({ [DESKTOP]: { ...desktopDescriptor, serverVersion: "0.0.44", orchestrationProtocolVersion: undefined } }));
+  assert.throws(() => assertCompatible(server), (e: unknown) => {
+    assert.ok(e instanceof CliError);
+    assert.equal(e.code, "incompatible_server");
+    assert.equal(e.exitCode, INCOMPATIBLE_EXIT);
+    assert.match(e.message, /Update T3 Code \(http:\/\/127\.0\.0\.1:3774\) to 0\.1\.0 or newer/);
+    assert.deepEqual(e.details, { origin: DESKTOP, serverVersion: "0.0.44", orchestrationProtocolVersion: null, minServerVersion: "0.1.0", supportedProtocol: 2 });
+    return true;
+  });
+  const future = await discoverServer(undefined, deps({ [DESKTOP]: { ...desktopDescriptor, orchestrationProtocolVersion: 3 } }));
+  assert.throws(() => assertCompatible(future), /or update t3ctl/);
+  const fine = await discoverServer(undefined, deps({ [DESKTOP]: desktopDescriptor }));
+  assert.doesNotThrow(() => assertCompatible(fine));
 });

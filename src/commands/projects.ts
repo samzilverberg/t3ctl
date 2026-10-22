@@ -1,13 +1,13 @@
 import type { Command } from "commander";
 import { connect, type GlobalOpts } from "../context.js";
-import { api, dispatch } from "../http.js";
+import { api } from "../http.js";
 import { resolve } from "node:path";
 import { matchProject } from "../ops.js";
 import { existsSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import { withAuthRetry } from "../context.js";
 import { buildModelSelection, fetchProviders, resolveModel } from "../models.js";
-import { nowIso, uuid } from "../ids.js";
+import { uuid } from "../ids.js";
 import { emit, renderTable, short } from "../output.js";
 
 export function registerProjects(program: Command) {
@@ -38,7 +38,7 @@ export function registerProjects(program: Command) {
 
   projects
     .command("add <path>")
-    .description("Register a directory as a project (project.create)")
+    .description("Register a directory as a project (POST /api/projects/mutate project.create)")
     .option("-t, --title <title>", "project title (default: directory name)")
     .option("-m, --model <ref>", "default model for new threads in this project")
     .option("-e, --effort <level>", "default effort (with --model)")
@@ -58,8 +58,8 @@ export function registerProjects(program: Command) {
       }
       const projectId = uuid();
       const title = o.title ?? basename(workspaceRoot);
-      const res = await dispatch(ctx.client, { type: "project.create", commandId: uuid(), projectId, title, workspaceRoot, ...(o.createDir ? { createWorkspaceRootIfMissing: true } : {}), ...(defaultModelSelection ? { defaultModelSelection } : {}), createdAt: nowIso() });
-      emit(ctx.format, { projectId, title, workspaceRoot, defaultModelSelection: defaultModelSelection ?? null, sequence: res.sequence }, () => `created project ${title} (${projectId}) at ${workspaceRoot}`);
+      const project = await withAuthRetry(ctx, g, (c) => api.mutateProject(c, { type: "project.create", commandId: uuid(), projectId, title, workspaceRoot, ...(o.createDir ? { createWorkspaceRootIfMissing: true } : {}), ...(defaultModelSelection ? { defaultModelSelection } : {}) }));
+      emit(ctx.format, project, () => `created project ${project.title} (${project.id}) at ${project.workspaceRoot}`);
     });
 
   projects
@@ -73,7 +73,7 @@ export function registerProjects(program: Command) {
       const p = matchProject(shell.projects, ref);
       const n = shell.threads.filter((t) => t.projectId === p.id).length;
       if (n > 0 && !o.force) throw new Error(`project ${p.title} has ${n} active thread(s); pass --force to delete anyway`);
-      const res = await dispatch(ctx.client, { type: "project.delete", commandId: uuid(), projectId: p.id, ...(o.force ? { force: true } : {}) });
-      emit(ctx.format, { projectId: p.id, title: p.title, sequence: res.sequence }, () => `removed project ${p.title} (${p.id})`);
+      await withAuthRetry(ctx, g, (c) => api.mutateProject(c, { type: "project.delete", commandId: uuid(), projectId: p.id, ...(o.force ? { force: true } : {}) }));
+      emit(ctx.format, { projectId: p.id, title: p.title }, () => `removed project ${p.title} (${p.id})`);
     });
 }

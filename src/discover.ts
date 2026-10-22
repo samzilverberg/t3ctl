@@ -8,7 +8,53 @@ export interface EnvironmentDescriptor {
   label: string;
   platform: { os: string; arch: string };
   serverVersion: string;
+  /** Orchestrator protocol generation; absent on pre-0.1.0 (alpha, orchestrator V1) servers. */
+  orchestrationProtocolVersion?: number;
   capabilities: Record<string, unknown>;
+}
+
+/**
+ * Compatibility gate. T3 Code 0.1.0 (beta) replaced the orchestrator (V2): HTTP reads need the
+ * `x-t3-orchestration-protocol: 2` header, the WebSocket needs `?orchestrationProtocol=2`, and every thread
+ * command changed shape. Nothing in t3ctl speaks to the alphas any more, so we refuse them up front instead of
+ * failing on the first request with an opaque 400/426.
+ */
+export const MIN_SERVER_VERSION = "0.1.0";
+export const SUPPORTED_PROTOCOL = 2;
+export const INCOMPATIBLE_EXIT = 7;
+
+/** SemVer-ish compare on the numeric core only (`0.1.1-nightly.3` → 0.1.1). */
+export function compareVersions(a: string, b: string): number {
+  const num = (v: string) => v.replace(/^v/, "").split("-")[0].split(".").map((x) => Number.parseInt(x, 10) || 0);
+  const [x, y] = [num(a), num(b)];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+export interface Compatibility { ok: boolean; reason?: string }
+
+export function compatibility(d: EnvironmentDescriptor): Compatibility {
+  if (typeof d.serverVersion !== "string" || !/^\d+\.\d+/.test(d.serverVersion)) return { ok: false, reason: `server did not report a version (got ${JSON.stringify(d.serverVersion)})` };
+  if (compareVersions(d.serverVersion, MIN_SERVER_VERSION) < 0) return { ok: false, reason: `T3 Code ${d.serverVersion} is older than the minimum ${MIN_SERVER_VERSION} (the 0.0.x alphas use orchestrator V1, which t3ctl no longer speaks)` };
+  if (d.orchestrationProtocolVersion === undefined) return { ok: false, reason: `T3 Code ${d.serverVersion} advertises no orchestration protocol version (expected ${SUPPORTED_PROTOCOL})` };
+  if (d.orchestrationProtocolVersion !== SUPPORTED_PROTOCOL) return { ok: false, reason: `T3 Code ${d.serverVersion} speaks orchestration protocol ${d.orchestrationProtocolVersion}; this t3ctl supports ${SUPPORTED_PROTOCOL}` };
+  return { ok: true };
+}
+
+/** Throw `incompatible_server` (exit 7) unless the server is one we can talk to. */
+export function assertCompatible(server: Server): void {
+  const c = compatibility(server.descriptor);
+  if (c.ok) return;
+  const d = server.descriptor;
+  throw new CliError(
+    "incompatible_server",
+    `${c.reason}. Update T3 Code (${server.origin}) to ${MIN_SERVER_VERSION} or newer${d.orchestrationProtocolVersion !== undefined && d.orchestrationProtocolVersion > SUPPORTED_PROTOCOL ? ", or update t3ctl" : ""}.`,
+    { origin: server.origin, serverVersion: d.serverVersion, orchestrationProtocolVersion: d.orchestrationProtocolVersion ?? null, minServerVersion: MIN_SERVER_VERSION, supportedProtocol: SUPPORTED_PROTOCOL },
+    INCOMPATIBLE_EXIT,
+  );
 }
 
 export interface Server {

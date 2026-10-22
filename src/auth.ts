@@ -17,17 +17,20 @@ export function accountKey(server: Server): string {
 }
 
 /**
- * Locate the installed `t3` server CLI (same version as the running app) so we can mint a pairing
- * credential the official way (`t3 auth pairing create`), which writes a one-time grant into the
- * app's own SQLite. We never touch the DB ourselves.
+ * Locate a `t3` CLI matching the running app so we can mint a pairing credential the official way
+ * (`t3 auth pairing create`), which writes a one-time grant into the app's own SQLite. We never touch the DB.
+ * Since 0.1 the desktop app writes `~/.t3/bin/t3`, a wrapper that runs the CLI bundled inside the app (always the
+ * app's own version); the `runtime/versions/<v>` tree only exists for the background service.
  */
 export function findT3Bin(serverVersion: string): string[] {
+  const wrapper = join(T3_HOME, "bin", "t3");
+  if (existsSync(wrapper)) return [wrapper];
   const statePath = join(T3_HOME, "runtime", "service-state.json");
   let active = serverVersion;
   if (existsSync(statePath)) {
     try { active = (JSON.parse(readFileSync(statePath, "utf8")) as { activeVersion?: string }).activeVersion ?? active; } catch { /* ignore */ }
   }
-  for (const v of [active, serverVersion]) {
+  for (const v of [serverVersion, active]) {
     const bin = join(T3_HOME, "runtime", "versions", v, "node_modules", "t3", "dist", "bin.mjs");
     if (existsSync(bin)) return [process.execPath, bin];
   }

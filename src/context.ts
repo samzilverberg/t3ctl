@@ -1,4 +1,4 @@
-import { discoverServer, type Server } from "./discover.js";
+import { assertCompatible, discoverServer, type Server } from "./discover.js";
 import { ensureToken, pair, READ_SCOPES, OPERATE_SCOPES } from "./auth.js";
 import { makeClient, HttpError, type Client } from "./http.js";
 import { CliError } from "./errors.js";
@@ -16,6 +16,7 @@ export interface Ctx { server: Server; client: Client; format: Format }
  */
 export async function connect(opts: GlobalOpts, { write = false } = {}): Promise<Ctx> {
   const server = await discoverServer(opts.origin);
+  assertCompatible(server);
   const need = write ? OPERATE_SCOPES : READ_SCOPES;
   const token = await ensureToken(server, need, { autoPair: opts.autoPair !== false });
   return { server, client: makeClient(server, token), format: pickFormat(opts.format) };

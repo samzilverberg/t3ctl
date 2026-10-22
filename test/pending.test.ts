@@ -1,43 +1,41 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { derivePendingApprovals, derivePendingUserInputs, type Activity } from "../src/pending.js";
+import type { ThreadDetail } from "../src/http.js";
+import { derivePendingApprovals, derivePendingUserInputs } from "../src/pending.js";
 
-const load = (name: string) => JSON.parse(readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), "utf8")) as Activity[];
-const approval = load("activities-approval");
-const userInput = load("activities-user-input");
+const detail = JSON.parse(readFileSync(new URL("./fixtures/projection-pending.json", import.meta.url), "utf8")) as ThreadDetail;
+const p = detail.projection;
 
-test("resolved requests are not pending", () => {
-  assert.deepEqual(derivePendingApprovals(approval), []);
-  assert.deepEqual(derivePendingUserInputs(userInput), []);
-  assert.deepEqual(derivePendingUserInputs(approval), []);   // wrong-kind activities are ignored
+test("pending approvals: pending non-question runtime requests, enriched from the approval_request turn item", () => {
+  const pending = derivePendingApprovals(p);
+  assert.equal(pending.length, 1);                       // the resolved command request is not pending
+  const a = pending[0];
+  assert.equal(a.requestId, "rr-approval-1");
+  assert.equal(a.requestKind, "file-change");
+  assert.match(a.detail ?? "", /^Write:/);
+  assert.deepEqual(a.options?.map((o) => o.decision), ["accept", "acceptForSession", "decline"]);
 });
 
-test("an approval.requested without a later approval.resolved is pending", () => {
-  const acts = approval.filter((a) => a.kind !== "approval.resolved");
-  const pending = derivePendingApprovals(acts);
-  assert.equal(pending.length, 1);
-  const p = pending[0];
-  assert.match(p.requestId, /^[0-9a-f-]{36}$/);
-  assert.equal(p.requestKind, "file-change");
-  assert.equal(p.requestType, "file_change_approval");
-  assert.match(p.detail ?? "", /^Write:/);
-  assert.equal(p.options, undefined);   // the server sends no option list for file-change approvals
-});
-
-test("a user-input.requested without a later user-input.resolved is pending, with question shape", () => {
-  const acts = userInput.filter((a) => a.kind !== "user-input.resolved");
-  const pending = derivePendingUserInputs(acts);
+test("pending user inputs: user_input requests with their questions", () => {
+  const pending = derivePendingUserInputs(p);
   assert.equal(pending.length, 1);
   const q = pending[0].questions[0];
-  assert.equal(typeof q.id, "string");
-  assert.equal(typeof q.question, "string");
-  assert.ok(q.options.length >= 2);
-  assert.equal(typeof q.options[0].label, "string");
+  assert.equal(pending[0].requestId, "rr-user-input-1");
+  assert.equal(q.id, "approach");
+  assert.equal(q.options.length, 2);
+  assert.equal(q.options[0].label, "Remove");
   assert.equal(q.multiSelect, false);
 });
 
-test("order is by sequence, so an out-of-order resolved still closes the request", () => {
-  const shuffled = [...approval].reverse();
-  assert.deepEqual(derivePendingApprovals(shuffled), []);
+test("a request without a matching turn item still shows up (kind only)", () => {
+  const stripped = { runtimeRequests: p.runtimeRequests, turnItems: [] };
+  assert.deepEqual(derivePendingApprovals(stripped).map((a) => [a.requestId, a.requestKind, a.detail]), [["rr-approval-1", "file-change", undefined]]);
+  assert.deepEqual(derivePendingUserInputs(stripped).map((u) => [u.requestId, u.questions.length]), [["rr-user-input-1", 0]]);
+});
+
+test("nothing pending once requests are resolved", () => {
+  const resolved = { runtimeRequests: p.runtimeRequests.map((r) => ({ ...r, status: "resolved" })), turnItems: p.turnItems };
+  assert.deepEqual(derivePendingApprovals(resolved), []);
+  assert.deepEqual(derivePendingUserInputs(resolved), []);
 });
