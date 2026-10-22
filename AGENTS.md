@@ -16,7 +16,8 @@ start a T3 server. README.md holds the user docs and protocol research; this fil
   first run; everything else is an `OrchestrationV2Command` via `orchestration.dispatchCommand`
   (`message.dispatch`, `runtime-request.respond`, `thread.stop`, `thread.*`). Projects use
   `POST /api/projects/mutate`. Reads use HTTP with the `x-t3-orchestration-protocol: 2` header; the WS URL carries
-  `?orchestrationProtocol=2`. The scheduler is the server's (`scheduledTasks.*`), never a local file or ticker.
+  `?orchestrationProtocol=2`. Recurring schedules are the server's (`scheduledTasks.*`); the only client-side
+  scheduling is `--once` (src/once.ts + the launchd ticker), because the server has no single-fire schedule.
 - **Type only what you render.** `@t3tools/contracts` is unpublished and changes per release; keep interfaces in
   `src/http.ts` loose and pass unknown fields through. Check `/tmp/t3code-src` (tag matching the installed
   `serverVersion`; `git clone --depth 1 --branch v<version> https://github.com/pingdotgg/t3code /tmp/t3code-src`)
@@ -50,7 +51,8 @@ src/wait.ts         threadStatus() from the V2 shell row; wait-for-idle from the
 src/pending.ts      pending approvals / questions from projection.runtimeRequests + request turn items
 src/time.ts         "when" parser for snooze and one-shot schedules
 src/schedule.ts     schedule parsing/rendering, cron → T3 schedule conversion, legacy (≤0.4) job file reader for `schedule migrate`
-src/launchd.ts      removal of the legacy LaunchAgent (dev.t3ctl.scheduler) by `schedule migrate --apply`
+src/once.ts         client-side one-shot jobs (~/.config/t3ctl/once.json): store, due/grace evaluation, tick lock
+src/launchd.ts      LaunchAgent dev.t3ctl.scheduler running `schedule tick` every minute (T3CTL_NO_LAUNCHD=1 disables; tests set it)
 skills/t3ctl        agent skill; symlinked at ~/.claude/skills/t3ctl (edits are live immediately)
 test/*.test.ts      node:test unit tests (run with `pnpm test`); test/fixtures = scrubbed V2 server payloads
 docs/*.md           user docs split by topic (commands, scheduler, models, auth, agents, architecture)
@@ -75,7 +77,8 @@ docs/research       protocol notes from the upstream source
 shell snapshot with one thread per derived status, a projection with a pending approval and a pending question).
 Pure logic is covered: `time`, `schedule` (duration/weekday/cron conversion, legacy job conversion), `models`
 (alias + fuzzy resolution, option validation), `pending`, `threadStatus`, `matchThread`/`matchProject`, the
-guard and batch parsing, `compatibility`/`assertCompatible`. Nothing in `test/` talks to a real server.
+guard and batch parsing, `compatibility`/`assertCompatible`, the one-shot store (`once`). Nothing in `test/` talks
+to a real server, and `runCli` sets `T3CTL_NO_LAUNCHD=1` so no test can touch the real launchd agent.
 
 When the server changes shape, re-record: find (or create, with `--runtime-mode approval-required`) a thread
 blocked on an approval or question, then `pnpm record-fixtures <thatThreadRef>`, and check the diff for anything
@@ -104,7 +107,8 @@ t3ctl threads archive "$id"               # always clean up smoke threads
 Scheduler: `t3ctl schedule add --every 1h -p dev -m sonnet -e low -t "t3ctl e2e sched" "Reply with exactly OK."`,
 then `schedule show|disable|enable|update <id> --at 09:30 --days mon-fri|run|remove <id>`. `schedule run` starts
 a real (paid) run; archive the thread it creates. `schedule migrate` without `--apply` is read-only. Remove test
-tasks afterwards.
+tasks afterwards. One-shots: `schedule add --once 2m --thread <smoke thread> "Reply with exactly FIRED."`, then
+watch `~/.config/t3ctl/once.json` flip to `fired` and the thread answer; `schedule tick` runs the same path by hand.
 
 Approval paths: create with `--runtime-mode approval-required` and a prompt that writes a file under `/tmp`;
 `threads pending` → `threads approve`. Guard paths: run the same `threads new` twice within a minute (second

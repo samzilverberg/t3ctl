@@ -2,7 +2,7 @@
 
 Control an **already-running** [T3 Code](https://t3.gg) desktop app from the terminal: list and read threads,
 start new ones (project, model, reasoning effort), send follow-ups, answer approvals, wait for results, and
-manage T3 Code's built-in scheduled tasks. Built for humans at a shell and for agents that delegate work to
+manage T3 Code's built-in scheduled tasks (plus one-shots, which the server cannot do yet). Built for humans at a shell and for agents that delegate work to
 T3 Code sessions.
 
 t3ctl never starts a server. It finds the app's own backend, pairs with it once (token in the macOS Keychain) and
@@ -32,6 +32,7 @@ t3ctl threads pending <ref> && t3ctl threads approve <ref>
 t3ctl threads send <ref> "Also add a regression test"
 t3ctl schedule add --at 09:00 --days mon-fri -p myrepo "Triage new issues"      # T3 Code's built-in scheduler
 t3ctl schedule add --every 2h --thread <ref> "Summarise open PRs"
+t3ctl schedule add --once "tomorrow 09:00" --thread <ref> "Check the deploy"     # one-shot (t3ctl ticker)
 ```
 
 `<ref>` is an id, an id prefix, or an exact title. `-m` takes a slug or an alias (`opus`, `sonnet`, `fable`).
@@ -40,7 +41,7 @@ Output is a table on a TTY and JSON otherwise, so the same commands work in scri
 ## Docs
 
 - [Command reference](docs/commands.md) — every command, flag, exit code and status value.
-- [Scheduler](docs/scheduler.md) — T3 Code's scheduled tasks from the CLI; migrating from the old launchd ticker.
+- [Scheduler](docs/scheduler.md) — T3 Code's scheduled tasks from the CLI, one-shots via the t3ctl ticker, migration.
 - [Models and defaults](docs/models.md) — aliases, fuzzy refs, config `defaults`.
 - [Auth and tokens](docs/auth.md) — pairing, Keychain, automatic re-pairing, scopes.
 - [Agents and task trackers](docs/agents.md) — the Claude Code skill, pairing threads with your own task list.
@@ -55,6 +56,6 @@ pnpm test           # unit tests against recorded fixtures (test/fixtures)
 pnpm build          # required after changes: the global link runs dist/
 ```
 
-Status: v0.5.0, verified against T3 Code 0.1.1 (2026-10-22). Minimum supported T3 Code: **0.1.0**
+Status: v0.6.0, verified against T3 Code 0.1.1 (2026-10-22). Minimum supported T3 Code: **0.1.0**
 (orchestration protocol 2, checked on every connect). The protocol is internal to T3 Code; expect to re-check
 after app updates. MIT.

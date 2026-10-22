@@ -169,7 +169,8 @@ export function runCli(origin: string, args: string[], stdin?: string, config: R
   const entry = new URL("../src/index.ts", import.meta.url).pathname;
   return new Promise((resolve) => {
     const child = execFile(process.execPath, ["--import", "tsx", entry, "--origin", origin, "-f", "json", ...args], {
-      env: { ...process.env, T3CTL_TOKEN: "fake-token", T3CTL_CONFIG_DIR: configDir, ...env },
+      // T3CTL_NO_LAUNCHD: the suite must never install/remove the real launchd ticker.
+      env: { ...process.env, T3CTL_TOKEN: "fake-token", T3CTL_CONFIG_DIR: configDir, T3CTL_NO_LAUNCHD: "1", ...env },
     }, (err, stdout, stderr) => resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout, stderr }));
     if (stdin !== undefined) child.stdin?.end(stdin); else child.stdin?.end();
   });

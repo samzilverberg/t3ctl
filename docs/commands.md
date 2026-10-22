@@ -32,17 +32,19 @@ t3ctl threads snooze <ref> -u <when> | unsnooze <ref>        # sidebar visibilit
 t3ctl threads settle|unsettle <ref>
 t3ctl threads interrupt|archive|unarchive <ref>
 
-t3ctl schedule add (--every <dur> | --at HH:MM [--days spec] | --cron <expr> | --webhook)
+t3ctl schedule add (--every <dur> | --at HH:MM [--days spec] | --cron <expr> | --webhook | --once <when> [--grace <dur>])
                    -p <project> | --thread <ref> [-m model] [-e effort] [-t title] [--env …] [--disabled] "<prompt>"
-t3ctl schedule [list] [-p project] | show <ref> | update <ref> [flags] [prompt] | enable|disable <ref> | run <ref> | remove <ref>
-t3ctl schedule migrate [--apply]                             # legacy ≤0.4 launchd jobs → T3 Code tasks
+t3ctl schedule [list] [-p project] [-a] | show <ref> | update <ref> [flags] [prompt] | enable|disable <ref> | run <ref> | remove <ref>
+t3ctl schedule tick | install | uninstall                    # the one-shot ticker (launchd, every minute)
+t3ctl schedule migrate [--apply] [--from <file>]             # legacy ≤0.4 jobs → T3 Code tasks + t3ctl one-shots
 ```
 
 Global flags: `--origin <url>` (skip discovery; also `T3CTL_ORIGIN`), `-f json|table`, `--no-auto-pair`.
 `T3CTL_TOKEN` overrides the Keychain. `T3CTL_CONFIG_DIR` relocates `~/.config/t3ctl`.
 
 `<when>` (snooze) = ISO, `30m`/`2h`/`3d`/`1w`, `HH:MM` (today, else tomorrow), or `"tomorrow [HH:MM]"` (default 09:00).
-Schedules are T3 Code's: interval, fixed daily time (+weekdays) or webhook; see [scheduler.md](scheduler.md).
+Recurring schedules are T3 Code's (interval, fixed daily time + weekdays, webhook); `--once <when>` is a
+client-side one-shot fired by the t3ctl ticker. See [scheduler.md](scheduler.md).
 
 ## Supported T3 Code versions
 
@@ -75,7 +77,7 @@ printed on stdout as `{"error": {"code", "message", …details}}`:
 | `no_server` | 1 | `origin` or `probed` |
 | `incompatible_server` | 7 | `origin`, `serverVersion`, `orchestrationProtocolVersion`, `minServerVersion`, `supportedProtocol` |
 | `thread_running` / `thread_idle` / `thread_archived` / `nothing_pending` | 1 | `threadId`, `status` (`send` without `--queue`/`--steer`, `interrupt` with no run, …) |
-| `task_not_found` / `cron_not_expressible` / `removed_command` | 1 | `ref` + `known` / `cron`, `reason` / `command` (scheduler) |
+| `task_not_found` / `cron_not_expressible` | 1 | `ref` + `known` + `once` / `cron`, `reason` (scheduler) |
 | `auth` | 1 | not paired / token rejected / pairing failed (`status` when the server answered) |
 | `http_error` / `rpc_error` | 1 | `status`, `path` / `rpc` (server refused a request, e.g. 403 on a read-only token) |
 | `usage` | 1 | `commanderCode` (bad or missing flag/argument, non-numeric count/seconds; commander prints usage on stderr) |
@@ -168,8 +170,8 @@ the usual `threads new` summaries.
 
 T3's `thread.snooze` only hides the thread from the sidebar until `snoozedUntil`. A running run keeps running; a
 draft stays a draft. The server rejects snoozing a thread whose run is still being prepared, so `new --snooze`
-waits for the run to start before snoozing. Recurring work belongs in `t3ctl schedule` (T3 Code's scheduler);
-there is no server-side deferred single start.
+waits for the run to start before snoozing. Deferred and recurring work belongs in `t3ctl schedule`
+(`--once <when>` for a single deferred start, the rest on T3 Code's scheduler).
 
 ## Sending to a busy thread
 

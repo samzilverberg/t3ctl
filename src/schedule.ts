@@ -164,18 +164,25 @@ export function readLegacyJobs(path = LEGACY_SCHEDULE_PATH): LegacyJob[] {
 }
 
 export type LegacyConversion =
-  | { ok: true; job: LegacyJob; schedule: Schedule; title: string; prompt: string; note?: string }
+  | { ok: true; kind: "task"; job: LegacyJob; schedule: Schedule; title: string; prompt: string; note?: string }
+  | { ok: true; kind: "once"; job: LegacyJob; at: string; title: string; prompt: string }
   | { ok: false; job: LegacyJob; reason: string };
 
-/** Pending recurring legacy jobs → T3 schedules. One-shots have no server equivalent and are reported as such. */
-export function convertLegacyJob(job: LegacyJob): LegacyConversion {
+/**
+ * Pending legacy jobs: recurring crons → T3 schedules (server tasks); one-shots still in the future → client-side
+ * one-shot jobs (src/once.ts), since the server has no single-fire schedule.
+ */
+export function convertLegacyJob(job: LegacyJob, now = new Date()): LegacyConversion {
   const prompt = job.new?.text ?? job.send?.text ?? "";
   const title = job.new?.title ?? prompt.split("\n")[0].slice(0, 80) ?? "Scheduled task";
   if (!job.nextAt) return { ok: false, job, reason: "already finished (one-shot that fired)" };
-  if (!job.cron) return { ok: false, job, reason: `one-shot at ${job.nextAt}: T3 Code has no one-shot schedules (start it yourself with threads new, or use --at HH:MM and remove the task after it runs)` };
+  if (!job.cron) {
+    if (Date.parse(job.nextAt) <= now.getTime()) return { ok: false, job, reason: `one-shot at ${job.nextAt} is already in the past` };
+    return { ok: true, kind: "once", job, at: job.nextAt, title, prompt };
+  }
   try {
     const schedule = cronToSchedule(job.cron);
-    return { ok: true, job, schedule, title, prompt, ...(job.tz && job.tz.toUpperCase() !== "UTC" ? { note: `was pinned to ${job.tz}; T3 Code fixed times are in the server's local time zone` } : job.tz ? { note: "was pinned to UTC; T3 Code fixed times are in the server's local time zone" } : {}) };
+    return { ok: true, kind: "task", job, schedule, title, prompt, ...(job.tz && job.tz.toUpperCase() !== "UTC" ? { note: `was pinned to ${job.tz}; T3 Code fixed times are in the server's local time zone` } : job.tz ? { note: "was pinned to UTC; T3 Code fixed times are in the server's local time zone" } : {}) };
   } catch (e) {
     return { ok: false, job, reason: e instanceof Error ? e.message : String(e) };
   }

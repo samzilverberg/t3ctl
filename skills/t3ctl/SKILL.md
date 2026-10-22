@@ -1,6 +1,6 @@
 ---
 name: t3ctl
-description: Read, create and drive T3 Code sessions from the terminal via the t3ctl CLI. Use when asked to list T3 Code threads/projects, check whether a delegated T3 Code session is running or idle, read a thread's latest messages, search past threads, start a new T3 Code thread for a task (choosing project, model and reasoning effort), send a follow-up, or wait for a thread to finish.
+description: Read, create and drive T3 Code sessions from the terminal via the t3ctl CLI. Use when asked to list T3 Code threads/projects, check whether a delegated T3 Code session is running or idle, read a thread's latest messages, search past threads, start a new T3 Code thread for a task (choosing project, model and reasoning effort), send a follow-up, wait for a thread to finish, or schedule a ONE-TIME prompt for later ("in 2 hours", "tomorrow at 9", "on Oct 25 at 07:30", "send later", "remind this thread", "follow up at …") — T3 Code's own schedule_task / CronCreate / ScheduleWakeup cannot do a durable one-off; `t3ctl schedule add --once` can.
 ---
 
 # t3ctl — control the running T3 Code app
@@ -49,9 +49,10 @@ error, never "the first one". Prefer full ids in anything you write down.
 | Create without starting | `t3ctl threads new -p <project> --draft -t "<title>" [--snooze 2h]` |
 | Done for now / tidy | `t3ctl threads settle <ref>` (keeps it, leaves inbox), `t3ctl threads archive <ref>`, `t3ctl threads interrupt <ref>` |
 | Register a repo | `t3ctl projects add <path> [-m model -e effort]` |
-| Recurring task (T3 Code scheduler) | `t3ctl schedule add --at HH:MM [--days mon-fri] \| --every 2h \| --cron "0 9 * * 1-5" -p <project> [-m model -e effort -t title] "<prompt>"` → `{id, schedule, nextRunAt}`; a new thread per run |
+| **One-time** prompt later ("in 2h", "tomorrow 09:00", a date) | `t3ctl schedule add --once "<when>" --thread <ref> "<prompt>"` (or `-p <project>` for a new thread) → `{id:"once:…", at, tickerInstalled}`; `<when>` = `30m`/`2h`, `17:30`, `"tomorrow 09:00"`, ISO. Fired by the t3ctl launchd ticker, queued if the thread is busy. **Not** `schedule_task` (no one-time type), not `CronCreate`/`ScheduleWakeup` (die with the Claude process). |
+| Recurring task (T3 Code scheduler) | `t3ctl schedule add --at HH:MM [--days mon-fri] \| --every 2h \| --cron "0 9 * * 1-5" -p <project> [-m model -e effort -t title] "<prompt>"` → `{id, schedule, nextRunAt}`; a new thread per run. Same objects as the MCP `schedule_task` tools; either is fine. |
 | Recurring follow-up into one thread | `t3ctl schedule add --every 1h --thread <ref> "<prompt>"` |
-| See / change / cancel | `t3ctl schedule` → `{tasks:[{id,title,enabled,schedule,nextRunAt,lastRunStatus,threadId}]}` · `schedule update\|enable\|disable\|run\|remove <ref>` |
+| See / change / cancel | `t3ctl schedule [-a]` → `{tasks:[…], once:[{id,at,status,threadId}], ticker:{installed}}` · `schedule update\|enable\|disable\|run\|remove <ref>` (`run` on a one-shot fires it now; `update --once <when>` moves it) |
 
 Long prompts: `printf '%s' "$PROMPT" | t3ctl threads new -p mono -m opus -e high -`  (`-` = read the prompt from stdin).
 
@@ -82,11 +83,13 @@ Errors: any failure exits non-zero and prints `{"error":{"code","message",…}}`
   really wanted and the task is different, create the related threads together with `--batch` (2-5 items), or
   retry after `retryAfterSec`. Prompts from one template ("PR #123" / "PR #124") also count as alike. `rate_limited` (also exit 6) means 5+ threads were created in the project in the
   last minute: stop and check for a loop. Need several threads for one request? Use one `--batch` call.
-- Snooze hides a thread; it does not delay or schedule work. There are no one-shot schedules ("in 2h"): either
-  start the thread now, or create a recurring task (`--at HH:MM`) and remove it after it ran. Schedules are
-  interval / fixed daily time (+weekdays, server-local time) / webhook; a cron the server cannot express exits with
-  `cron_not_expressible`. Tasks are T3 Code's own (same as the `schedule_task` MCP tools); the server skips an
-  occurrence while the task's previous run is still active.
+- Snooze hides a thread; it does not delay or schedule work. For "do X once at <time>" use `schedule add --once`;
+  if the output says `tickerInstalled: false`, tell the user to run `t3ctl schedule install` (nothing fires
+  without it). The one-shot prompt must be self-contained: the thread may have compacted by then. Recurring
+  schedules are the server's: interval / fixed daily time (+weekdays, server-local time) / webhook; a cron the
+  server cannot express exits with `cron_not_expressible`; the server skips an occurrence while the task's
+  previous run is still active. Never emulate a one-shot with an interval task plus a delete, or with a
+  weekday-limited fixed time: both fire on the wrong days.
 - Omitting `-m` uses config `defaults.model` if set, else the project default, else the server default.
 
 ## Optional: driving t3ctl from a task tracker
@@ -95,7 +98,8 @@ t3ctl does not know about any notes app or tracker. If the user runs tasks from 
 planner, an issue tracker), the pairing is a convention you keep in that tool:
 
 - Store the thread id on the task (e.g. frontmatter/field `t3-thread: <uuid>`, plus `t3-status`, `t3-updated`).
-  `threads new` prints the id as JSON; for scheduled tasks the thread id exists only after a run (`schedule show`).
+  `threads new` prints the id as JSON; for scheduled tasks and one-shots the thread id exists only after a run
+  (`schedule show <ref>`: `threadId`).
 - Delegate: `t3ctl threads new -p <project> -m <model> -e <effort> -t "<task title>" "<prompt incl. task
   reference + deliverable>"`, then record the id and `t3-status: running` right away.
 - Sync loop: `t3ctl threads -i id1,id2,…` for all tracked ids → surface `needs-human` first, then `idle`

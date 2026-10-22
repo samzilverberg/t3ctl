@@ -58,18 +58,22 @@ test("describeSchedule", () => {
   assert.equal(describeSchedule({ type: "webhook", signature: null }), "webhook");
 });
 
-test("legacy launchd jobs: recurring cron converts, one-shots and finished jobs are skipped with a reason", () => {
+test("legacy launchd jobs: recurring cron → server task, future one-shot → t3ctl one-shot, past/finished skipped with a reason", () => {
+  const NOW = new Date("2026-10-22T12:00:00Z");
   const base = { createdAt: "2026-09-10T00:00:00Z", graceSec: 3600, runs: [] };
   const cron: LegacyJob = { ...base, id: "a", cron: "0 9 * * 1-5", tz: "UTC", nextAt: "2026-10-23T09:00:00Z", new: { project: "p", text: "Morning: triage\nmore", model: "sonnet" } };
   const once: LegacyJob = { ...base, id: "b", nextAt: "2026-10-23T09:00:00Z", send: { thread: "t", text: "ping" } };
   const done: LegacyJob = { ...base, id: "c", nextAt: null, new: { project: "p", text: "x" } };
   const weird: LegacyJob = { ...base, id: "d", cron: "0 9 1 * *", nextAt: "2026-11-01T09:00:00Z", new: { project: "p", text: "monthly" } };
-  const c = convertLegacyJob(cron);
-  assert.ok(c.ok);
-  if (c.ok) { assert.deepEqual(c.schedule, { type: "fixed_time", timeOfDay: "09:00", weekdays: [1, 2, 3, 4, 5] }); assert.equal(c.title, "Morning: triage"); assert.match(c.note ?? "", /UTC/); }
-  const o = convertLegacyJob(once); assert.equal(o.ok, false); if (!o.ok) assert.match(o.reason, /one-shot/);
-  const d = convertLegacyJob(done); assert.equal(d.ok, false); if (!d.ok) assert.match(d.reason, /finished/);
-  const w = convertLegacyJob(weird); assert.equal(w.ok, false); if (!w.ok) assert.match(w.reason, /cannot be expressed/);
+  const c = convertLegacyJob(cron, NOW);
+  assert.ok(c.ok && c.kind === "task");
+  if (c.ok && c.kind === "task") { assert.deepEqual(c.schedule, { type: "fixed_time", timeOfDay: "09:00", weekdays: [1, 2, 3, 4, 5] }); assert.equal(c.title, "Morning: triage"); assert.match(c.note ?? "", /UTC/); }
+  const o = convertLegacyJob(once, NOW);
+  assert.ok(o.ok && o.kind === "once");
+  if (o.ok && o.kind === "once") { assert.equal(o.at, "2026-10-23T09:00:00Z"); assert.equal(o.prompt, "ping"); }
+  const stale = convertLegacyJob(once, new Date("2026-10-24T00:00:00Z")); assert.equal(stale.ok, false); if (!stale.ok) assert.match(stale.reason, /already in the past/);
+  const d = convertLegacyJob(done, NOW); assert.equal(d.ok, false); if (!d.ok) assert.match(d.reason, /finished/);
+  const w = convertLegacyJob(weird, NOW); assert.equal(w.ok, false); if (!w.ok) assert.match(w.reason, /cannot be expressed/);
 });
 
 test("matchTask: id, prefix, exact title", () => {
