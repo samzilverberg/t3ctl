@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { matchProject, matchThread } from "../src/ops.js";
 import { CliError } from "../src/errors.js";
 import { INCOMPATIBLE_EXIT } from "../src/discover.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runCli, startFake, type Fake } from "./fake-server.js";
 
 let fake: Fake;
@@ -253,4 +256,29 @@ test("cli: the removed client-side scheduler commands say so", async () => {
   const tick = await runCli(fake.origin, ["schedule", "tick"]);
   assert.equal(tick.code, 0);                                 // the old launchd agent must not log a failure every minute
   assert.match(tick.stderr, /schedule migrate/);
+});
+
+test("cli: schedule migrate (dry run) skips legacy jobs the server already schedules for the same target, converts the rest", async () => {
+  const t = fake.seed("Board", "x", 5);
+  fake.tasks.push({ id: "task-existing", title: "Daily planner loop", prompt: "plan", enabled: true, projectId: fake.project.id, threadId: t.id, schedule: { type: "fixed_time", timeOfDay: "09:00", weekdays: [1, 2, 3, 4, 5] }, workspaceStrategy: { type: "root" }, modelSelection: { instanceId: "claudeAgent", model: "claude-opus-4-8" }, runtimeMode: "auto", interactionMode: "default", createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z", nextRunAt: "2030-01-01T09:00:00.000Z", lastRunAt: null, lastRunStatus: "never", lastRunError: null, runCount: 0 } as never);
+  const dir = mkdtempSync(join(tmpdir(), "t3ctl-legacy-"));
+  writeFileSync(join(dir, "config.json"), "{}");
+  const job = (id: string, cron: string | undefined, nextAt: string, send: Record<string, unknown>) => ({ id, createdAt: "2026-09-01T00:00:00.000Z", cron, nextAt, graceSec: 3600, send, runs: [] });
+  writeFileSync(join(dir, "schedule.json"), JSON.stringify({ jobs: [
+    job("dup00000", "0 9 * * 1-5", "2030-01-01T09:00:00.000Z", { thread: t.id, text: "plan the day" }),
+    job("new00000", "0 8 * * 4", "2030-01-01T08:00:00.000Z", { thread: t.id, text: "weekly review", effort: "low" }),
+    job("once0000", undefined, "2030-01-01T10:00:00.000Z", { thread: t.id, text: "one shot" }),
+  ] }));
+  const r = await runCli(fake.origin, ["schedule", "migrate"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.apply, false);
+  const byJob = Object.fromEntries(out.plan.map((p: { job: string }) => [p.job, p]));
+  assert.equal(byJob.dup00000.action, "skip");
+  assert.match(byJob.dup00000.reason, /already scheduled as task task-existing/);
+  assert.equal(byJob.new00000.action, "would-create");
+  assert.equal(byJob.new00000.schedule, "thu 08:00");
+  assert.equal(byJob.once0000.action, "skip");
+  assert.match(byJob.once0000.reason, /no one-shot/);
+  assert.equal(fake.tasks.length, 1);     // dry run creates nothing
 });

@@ -159,14 +159,20 @@ export function registerSchedule(program: Command) {
       const ctx = await connect(g, { write: o.apply });
       const shell = await withAuthRetry(ctx, g, api.shell);
       const config = await fetchConfig(ctx.server, ctx.client.token);
+      const existing = (await withAuthRetry(ctx, g, (cl) => rpc<{ tasks: ScheduledTask[] }>(cl, "scheduledTasks.list", {}))).tasks;
       const plan: Array<Record<string, unknown>> = [];
       const created: ScheduledTask[] = [];
       for (const c of conversions) {
         if (!c.ok) { plan.push({ job: c.job.id, action: "skip", reason: c.reason, cron: c.job.cron ?? null, nextAt: c.job.nextAt }); continue; }
         try {
           const target = await resolveTarget(ctx, shell, config, { project: c.job.new?.project, thread: c.job.send?.thread, model: c.job.new?.model ?? c.job.send?.model, effort: c.job.new?.effort ?? c.job.send?.effort, env: c.job.new?.env, runtimeMode: c.job.new?.runtimeMode as RuntimeMode | undefined, interactionMode: c.job.new?.interactionMode as InteractionMode | undefined });
+          const targetLabel = target.threadId ? `thread ${short(target.threadId)}` : `project ${target.projectId}`;
+          // Same target + same schedule already on the server (hand-made in the app, or an earlier migrate run): creating
+          // another would fire twice. Skip it; the legacy job is retired with the file either way.
+          const dup = [...existing, ...created].find((t) => sameTarget(t, target) && describeSchedule(t.schedule) === describeSchedule(c.schedule));
+          if (dup) { plan.push({ job: c.job.id, action: "skip", reason: `already scheduled as task ${dup.id} (${dup.title})`, cron: c.job.cron, schedule: describeSchedule(c.schedule), target: targetLabel, existingTaskId: dup.id }); continue; }
           const input = { commandId: `t3ctl-migrate:${c.job.id}`, title: c.title, prompt: c.prompt, enabled: true, schedule: c.schedule, ...target, createdBy: "user", creationSource: "server" };
-          plan.push({ job: c.job.id, action: o.apply ? "create" : "would-create", cron: c.job.cron, schedule: describeSchedule(c.schedule), target: target.threadId ? `thread ${short(target.threadId)}` : `project ${target.projectId}`, ...(c.note ? { note: c.note } : {}) });
+          plan.push({ job: c.job.id, action: o.apply ? "create" : "would-create", cron: c.job.cron, schedule: describeSchedule(c.schedule), target: targetLabel, ...(c.note ? { note: c.note } : {}) });
           if (o.apply) created.push((await withAuthRetry(ctx, g, (cl) => rpc<{ task: ScheduledTask }>(cl, "scheduledTasks.upsert", input))).task);
         } catch (e) {
           plan.push({ job: c.job.id, action: "skip", reason: e instanceof Error ? e.message : String(e), cron: c.job.cron ?? null });
@@ -193,6 +199,11 @@ export function registerSchedule(program: Command) {
   for (const legacy of ["install", "uninstall"]) {
     sched.command(legacy, { hidden: true }).action(() => { throw new CliError("removed_command", `\`schedule ${legacy}\` is gone: T3 Code 0.1+ schedules server-side. Run \`t3ctl schedule migrate\` to move legacy jobs and remove the ticker.`, { command: `schedule ${legacy}` }); });
   }
+}
+
+/** A task targets the same place as a resolved target: the same thread, or (thread-less) the same project. */
+function sameTarget(t: ScheduledTask, target: { projectId: string; threadId: string | null }): boolean {
+  return target.threadId ? t.threadId === target.threadId : (!t.threadId && t.projectId === target.projectId);
 }
 
 interface TargetOpts { project?: string; thread?: string; model?: string; effort?: string; env?: string; base?: string; branch?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode }
@@ -226,7 +237,7 @@ async function resolveTarget(ctx: Ctx, shell: { projects: ShellProject[]; thread
     const project = shell.projects.find((p) => p.id === t.projectId);
     if (!project) throw new CliError("project_not_found", `thread ${short(t.id)} belongs to an unknown project`, { ref: t.projectId });
     // A bound run follows the thread's current provider; the stored selection only matters for new threads.
-    const modelSelection = (await resolveTurnModel(ctx, t, { model: d.model, effort: d.effort })) ?? (t.modelSelection as ModelSelection | undefined) ?? (await resolveNewModel(ctx, project, {}, config)).modelSelection;
+    const modelSelection = (await resolveTurnModel(ctx, t, { model: d.model, effort: d.effort })) ?? (t.modelSelection as ModelSelection | undefined) ?? (await resolveNewModel(ctx, project, { effort: d.effort }, config)).modelSelection;
     return { projectId: project.id, threadId: t.id, workspaceStrategy: { type: "root" }, modelSelection, runtimeMode: (o.runtimeMode ?? (t.runtimeMode as RuntimeMode | undefined) ?? d.runtimeMode), interactionMode: (o.interactionMode ?? (t.interactionMode as InteractionMode | undefined) ?? d.interactionMode) };
   }
   const project = matchProject(shell.projects, o.project ?? "");

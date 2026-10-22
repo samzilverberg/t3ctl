@@ -234,6 +234,9 @@ export interface SendOpts { text: string; model?: string; effort?: string; runti
 export async function resolveTurnModel(ctx: Ctx, t: ShellThread, o: Pick<SendOpts, "model" | "effort">): Promise<ModelSelection | undefined> {
   const current = t.modelSelection as ModelSelection | undefined;
   if (!o.model && !o.effort) return undefined;
+  // `-e` alone on a thread that never got a model (draft, imported) has nothing to re-apply the effort to: let the
+  // caller fall back to the project default instead of resolving "undefined/undefined".
+  if (!o.model && !current?.model) return undefined;
   const providers = await fetchProviders(ctx.server, ctx.client.token);
   const resolved = resolveModel(providers, o.model ?? `${current?.instanceId}/${current?.model}`);
   const baseEffort = (current?.options ?? []).find((x) => x.id === "effort")?.value;
