@@ -12,7 +12,7 @@ let fake: Fake;
 before(async () => { fake = await startFake(); });
 after(async () => { await fake.close(); });
 beforeEach(() => {
-  fake.threads.length = 0; fake.messages.clear(); fake.commands.length = 0; fake.launches.length = 0; fake.mutations.length = 0; fake.tasks.length = 0;
+  fake.threads.length = 0; fake.messages.clear(); fake.commands.length = 0; fake.launches.length = 0; fake.mutations.length = 0; fake.tasks.length = 0; fake.requests.clear(); delete (fake.descriptor.capabilities as Record<string, unknown>).threadForceStop;
   fake.descriptor.serverVersion = "0.1.1"; fake.descriptor.orchestrationProtocolVersion = 2;
 });
 
@@ -343,4 +343,53 @@ test("cli: schedule migrate moves pending 0.6 one-shots (once.json) to server ta
   assert.equal(fake.tasks.length, 2);                                // nothing migrates twice
   const list = await runCli(fake.origin, ["schedule"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
   assert.equal(JSON.parse(list.stdout).legacy, undefined);
+});
+
+// ---- Delegated children, approval feedback, interrupt variants (T3 Code 0.1.7) ----
+
+test("cli: a child blocked on an approval shows on the parent (list/pending) and approve answers it there, with feedback", async () => {
+  const parent = fake.seed("Parent", "x", 50, { status: "running", activeRunId: "run:p:1" });
+  const child = fake.seed("Child task", undefined, 40, { status: "waiting", activeRunId: "run:c:1", lineage: { parentThreadId: parent.id, relationshipToParent: "subagent", rootThreadId: parent.id }, pendingRuntimeRequest: { id: "rr-1", kind: "command", createdAt: "2026-11-05T00:00:00Z" } });
+  fake.requests.set(child.id, {
+    runtimeRequests: [{ id: "rr-1", kind: "command", status: "pending", createdAt: "2026-11-05T00:00:00Z", responseCapability: { type: "live", providerSessionId: "s", supportsFeedback: true } }],
+    turnItems: [{ id: "ti-1", type: "approval_request", requestId: "rr-1", requestKind: "command", prompt: "rm -rf /tmp/x", reason: "cleanup" }],
+  });
+  const list = JSON.parse((await runCli(fake.origin, ["threads"])).stdout) as Array<{ id: string; status: string; blockedBy?: string }>;
+  assert.deepEqual(list.map((t) => t.id), [parent.id]);                               // the subagent row is hidden…
+  assert.equal(list[0].status, "needs-approval");                                     // …but its approval shows on the parent
+  assert.equal(list[0].blockedBy, child.id);
+  assert.equal(JSON.parse((await runCli(fake.origin, ["threads", "--subagents"])).stdout).length, 2);
+
+  const pending = JSON.parse((await runCli(fake.origin, ["threads", "pending", parent.id])).stdout);
+  assert.equal(pending.children[0].threadId, child.id);
+  assert.equal(pending.children[0].approvals[0].reason, "cleanup");
+  assert.equal(pending.children[0].approvals[0].supportsFeedback, true);
+
+  const ok = await runCli(fake.origin, ["threads", "approve", parent.id, "-d", "decline", "--feedback", "use trash instead"]);
+  assert.equal(ok.code, 0, ok.stderr);
+  const cmd = fake.commands.at(-1)!;
+  assert.deepEqual([cmd.type, cmd.threadId, cmd.requestId, cmd.decision, cmd.feedback], ["runtime-request.respond", child.id, "rr-1", "decline", "use trash instead"]);
+
+  fake.requests.get(child.id)!.runtimeRequests[0] = { id: "rr-1", kind: "command", status: "pending", createdAt: "2026-11-05T00:00:00Z", responseCapability: { type: "not_resumable", reason: "gone" } };
+  const noFeedback = await runCli(fake.origin, ["threads", "approve", parent.id, "--feedback", "x"]);
+  assert.equal(errorOf(noFeedback).code, "invalid_option");
+
+  const wait = await runCli(fake.origin, ["threads", "wait", parent.id, "--timeout", "5"]);
+  assert.equal(wait.code, 2, wait.stderr);                                            // needs-human, via the child
+  assert.equal(JSON.parse(wait.stdout).blockedBy, child.id);
+});
+
+test("cli: interrupt stops delegated tasks by default; --keep-tasks opts out; --force needs the capability", async () => {
+  const t = fake.seed("Busy", "x", 5, { status: "running", activeRunId: "run:b:1" });
+  await runCli(fake.origin, ["threads", "interrupt", t.id]);
+  assert.equal(fake.commands.at(-1)!.stopDelegatedTasks, undefined);                  // server default: stop them too
+  await runCli(fake.origin, ["threads", "interrupt", t.id, "--keep-tasks"]);
+  assert.equal(fake.commands.at(-1)!.stopDelegatedTasks, false);
+  const old = await runCli(fake.origin, ["threads", "interrupt", t.id, "--force"]);
+  assert.equal(old.code, INCOMPATIBLE_EXIT);
+  (fake.descriptor.capabilities as Record<string, unknown>).threadForceStop = true;
+  const force = await runCli(fake.origin, ["threads", "interrupt", t.id, "--force"]);
+  assert.equal(force.code, 0, force.stderr);
+  assert.equal(JSON.parse(force.stdout).outcome, "killed");
+  assert.deepEqual([fake.commands.at(-1)!.type, fake.commands.at(-1)!.runId], ["orchestration.forceStopThread", "run:b:1"]);
 });

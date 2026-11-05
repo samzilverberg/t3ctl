@@ -8,7 +8,7 @@ t3ctl env                                  # which server we target (no auth); J
 t3ctl servers                              # every running T3 server on 127.0.0.1:3773-3780 (unsupported ones marked)
 t3ctl auth pair [--operate] | status | forget
 t3ctl models [-a] [--no-legacy]            # models per provider + allowed effort / context-window values
-t3ctl projects [list|show <ref>]
+t3ctl projects [list [-a]|show <ref>]                        # pinned first; archived only with -a
 t3ctl projects add <path> [-t title] [-m model] [-e effort] [--create-dir]
 t3ctl projects remove <ref> [--force]
 
@@ -25,12 +25,13 @@ t3ctl threads new  -p <project> [-m model] [-e effort] [--context-window 1m] [--
 t3ctl threads new -p <project> [shared flags] --batch <file|->   # 2-5 related threads in one call
 t3ctl threads new … --draft [--snooze <when>]                # create without starting a turn
 t3ctl threads send <ref> [-m model] [-e effort] [--queue|--steer] [--wait] "<prompt>"
-t3ctl threads pending <ref>                                  # open approval / user-input requests
-t3ctl threads approve <ref> [-d accept|acceptForSession|acceptAlways|decline|cancel] [-r requestId]
+t3ctl threads pending <ref>                                  # open approval / user-input requests, incl. delegated children
+t3ctl threads approve <ref> [-d accept|acceptForSession|acceptAlways|decline|cancel] [-r requestId] [--feedback <text>]
 t3ctl threads respond <ref> --answer <questionId>=<answer> … | --json '{…}'
 t3ctl threads snooze <ref> -u <when> | unsnooze <ref>        # sidebar visibility only
 t3ctl threads settle|unsettle <ref>
-t3ctl threads interrupt|archive|unarchive <ref>
+t3ctl threads interrupt <ref> [--keep-tasks | --force]      # also stops delegated tasks unless --keep-tasks; --force kills the agent (0.1.7+)
+t3ctl threads archive|unarchive <ref>
 
 t3ctl schedule add (--every <dur> | --at HH:MM [--days spec] | --cron <expr> | --webhook | --once <when>)
                    -p <project> | --thread <ref> [-m model] [-e effort] [-t title] [--env …] [--disabled] "<prompt>"
@@ -72,6 +73,7 @@ printed on stdout as `{"error": {"code", "message", …details}}`:
 | `batch_partial` | 1 | `created[]` (summaries), `failedIndex`, `cause` |
 | `invalid_batch` | 1 | `index` when an item is at fault |
 | `thread_not_found` / `project_not_found` | 1 | `ref` (`known` titles for projects) |
+| `project_archived` | 1 | `ref`, `projectId`, `archivedAt` (archived in the app; reads with `-p` still accept it) |
 | `model_unknown` / `invalid_option` | 1 | `ref` / `option`, `allowed` or `input` for times and durations (plus `index` inside a batch) |
 | `no_server` | 1 | `origin` or `probed` |
 | `incompatible_server` | 7 | `origin`, `serverVersion`, `orchestrationProtocolVersion`, `minServerVersion`, `supportedProtocol` |
@@ -91,6 +93,13 @@ Derived from the V2 shell row: `running` (an active run: preparing, queued, star
 (no active run; latest run completed), `needs-approval` / `needs-input` (a pending runtime request: command,
 file-change, permission, … / a question; wins over running), `error` (latest run failed), `interrupted`
 (interrupted or cancelled), `archived`, `new` (never ran).
+
+Requests the app never shows a human (`auth_refresh`, `dynamic_tool_call`) are ignored. An async question
+(`blocking: false`) does not block a running run; it counts once the run has ended. A thread whose delegated child
+(any depth) waits on an approval or question reports the child's status with `blockedBy: <childId>`, as the app
+shows child approvals in the parent; `threads pending/approve/respond <parent>` reach the child's request, and
+`threads wait <parent>` returns `needs-human` for it. Subagent children and side chats are hidden from `threads`
+(`--subagents` shows them).
 
 ## Thread creation defaults
 

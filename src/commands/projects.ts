@@ -15,15 +15,18 @@ export function registerProjects(program: Command) {
 
   projects
     .command("list", { isDefault: true })
-    .description("List projects with thread counts")
-    .action(async () => {
+    .description("List projects with thread counts, pinned first (archived ones only with --all)")
+    .option("-a, --all", "include archived projects", false)
+    .action(async (o: { all: boolean }) => {
       const { client, format } = await connect(program.opts<GlobalOpts>());
       const shell = await api.shell(client);
       const counts = new Map<string, number>();
       for (const t of shell.threads.filter(isListedThread)) counts.set(t.projectId, (counts.get(t.projectId) ?? 0) + 1);
-      const rows = shell.projects.map((p) => ({ ...p, threadCount: counts.get(p.id) ?? 0 }));
+      const rank = (p: { pinnedAt?: string | null; archivedAt?: string | null }) => (p.archivedAt ? 2 : p.pinnedAt ? 0 : 1);
+      const rows = shell.projects.filter((p) => o.all || !p.archivedAt).map((p) => ({ ...p, threadCount: counts.get(p.id) ?? 0 }))
+        .sort((a, b) => rank(a) - rank(b) || (a.pinnedAt ?? "").localeCompare(b.pinnedAt ?? ""));
       emit(format, rows, () =>
-        renderTable(rows.map((p) => ({ id: short(p.id), title: p.title, threads: p.threadCount, workspaceRoot: p.workspaceRoot })), ["id", "title", "threads", "workspaceRoot"]));
+        renderTable(rows.map((p) => ({ id: short(p.id), title: p.title, threads: p.threadCount, state: p.archivedAt ? "archived" : p.pinnedAt ? "pinned" : "", workspaceRoot: p.workspaceRoot })), ["id", "title", "threads", "state", "workspaceRoot"]));
     });
 
   projects
@@ -32,7 +35,7 @@ export function registerProjects(program: Command) {
     .action(async (ref: string) => {
       const { client, format } = await connect(program.opts<GlobalOpts>());
       const shell = await api.shell(client);
-      const p = matchProject(shell.projects, ref);
+      const p = matchProject(shell.projects, ref, { includeArchived: true });
       emit(format, p, () => JSON.stringify(p, null, 2));
     });
 
@@ -70,7 +73,7 @@ export function registerProjects(program: Command) {
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g, { write: true });
       const shell = await withAuthRetry(ctx, g, api.shell);
-      const p = matchProject(shell.projects, ref);
+      const p = matchProject(shell.projects, ref, { includeArchived: true });
       const n = shell.threads.filter((t) => t.projectId === p.id).length;
       if (n > 0 && !o.force) throw new Error(`project ${p.title} has ${n} active thread(s); pass --force to delete anyway`);
       await withAuthRetry(ctx, g, (c) => api.mutateProject(c, { type: "project.delete", commandId: uuid(), projectId: p.id, ...(o.force ? { force: true } : {}) }));

@@ -7,11 +7,12 @@ import { RpcSocket } from "../ws.js";
 import { uuid } from "../ids.js";
 import { createThread, createThreads, parseBatch, startTurn, matchThread, matchProject, effortOf, RUNTIME_MODES, INTERACTION_MODES, type RuntimeMode, type InteractionMode } from "../ops.js";
 import { parseWhen } from "../time.js";
-import { threadStatus, waitForIdle } from "../wait.js";
+import { descendants, familyStatus, isActionableRequest, threadStatus, waitForIdle } from "../wait.js";
 import { MAX_BATCH, MIN_BATCH } from "../guard.js";
 import { intArg } from "../args.js";
-import { derivePendingApprovals, derivePendingUserInputs } from "../pending.js";
+import { derivePendingApprovals, derivePendingUserInputs, type PendingApproval, type PendingUserInput } from "../pending.js";
 import { CliError } from "../errors.js";
+import { INCOMPATIBLE_EXIT } from "../discover.js";
 
 const APPROVAL_DECISIONS = ["accept", "acceptForSession", "acceptAlways", "decline"] as const;
 
@@ -47,8 +48,34 @@ function readPrompt(arg: string | undefined, o: { stdin?: boolean }): string {
 const PROMPT_ARG = "prompt text, or - to read it from stdin";
 const STDIN_ALIAS = "same as passing - as the prompt";
 
+/** Shell-row status for `waitForIdle`'s safety-net poll, including delegated children blocked on a human. */
 function shellPoller(client: import("../http.js").Client, threadId: string) {
-  return async () => (await api.shell(client)).threads.find((t) => t.id === threadId);
+  return async () => {
+    const { threads } = await api.shell(client);
+    const t = threads.find((x) => x.id === threadId);
+    return t ? familyStatus(t, threads) : undefined;
+  };
+}
+
+interface ThreadPending { threadId: string; title: string; child: boolean; approvals: PendingApproval[]; userInputs: PendingUserInput[] }
+
+/**
+ * Open requests of a thread and of its delegated children at any depth (T3 Code 0.1.7 surfaces child approvals in
+ * the parent; the request itself still lives on the child). Children are fetched only when their shell row shows one.
+ */
+async function familyPending(ctx: Ctx, threads: ShellThread[], t: ShellThread): Promise<ThreadPending[]> {
+  const kids = descendants(threads, t.id).filter((c) => c.pendingRuntimeRequest && isActionableRequest(c.pendingRuntimeRequest));
+  return Promise.all([t, ...kids].map(async (x) => {
+    const p = (await api.thread(ctx.client, x.id)).projection;
+    return { threadId: x.id, title: x.title, child: x.id !== t.id, approvals: derivePendingApprovals(p), userInputs: derivePendingUserInputs(p) };
+  }));
+}
+
+/** The request to act on: `-r <id>` anywhere in the family, else the thread's own oldest, else the oldest child's. */
+function pickRequest<T extends { requestId: string; createdAt: string }>(family: ThreadPending[], key: "approvals" | "userInputs", requestId?: string): { threadId: string; request: T } | undefined {
+  const all = family.flatMap((f) => (f[key] as unknown as T[]).map((request) => ({ threadId: f.threadId, child: f.child, request })));
+  if (requestId) return all.find((x) => x.request.requestId === requestId);
+  return all.filter((x) => !x.child)[0] ?? all.sort((a, b) => a.request.createdAt.localeCompare(b.request.createdAt))[0];
 }
 
 export function registerThreads(program: Command) {
@@ -69,21 +96,21 @@ export function registerThreads(program: Command) {
       if (o.ids) o.all = true;
       const shell = await loadThreads(ctx, g, o.all);
       const byProject = new Map(shell.projects.map((p) => [p.id, p]));
-      let list = shell.threads.map((t) => ({ ...t, status: threadStatus(t), projectTitle: byProject.get(t.projectId)?.title ?? "" }));
+      let list = shell.threads.map((t) => ({ ...t, ...familyStatus(t, shell.threads), projectTitle: byProject.get(t.projectId)?.title ?? "" }));
       if (o.ids) {
         const wanted = o.ids.split(",").map((x) => x.trim()).filter(Boolean);
         list = wanted.map((ref) => list.find((t) => t.id === ref || t.id.startsWith(ref)) ?? ({ id: ref, projectId: "", title: "", status: "missing", projectTitle: "" } as (typeof list)[number]));
-        emit(ctx.format, list, () => renderTable(list.map((t) => ({ id: short(t.id), status: t.status, title: t.title.slice(0, 60), updated: ago(t.updatedAt ?? t.createdAt) })), ["id", "status", "title", "updated"]));
+        emit(ctx.format, list, () => renderTable(list.map((t) => ({ id: short(t.id), status: t.blockedBy ? `${t.status} (child ${short(t.blockedBy)})` : t.status, title: t.title.slice(0, 60), updated: ago(t.updatedAt ?? t.createdAt) })), ["id", "status", "title", "updated"]));
         return;
       }
       if (!o.all) list = list.filter((t) => !t.archivedAt);
       if (!o.subagents) list = list.filter(isListedThread);
-      if (o.project) { const p = matchProject(shell.projects, o.project); list = list.filter((t) => t.projectId === p.id); }
+      if (o.project) { const p = matchProject(shell.projects, o.project, { includeArchived: true }); list = list.filter((t) => t.projectId === p.id); }
       if (o.status) list = list.filter((t) => t.status === o.status);
       list.sort((a, b) => Date.parse(b.updatedAt ?? b.createdAt ?? "0") - Date.parse(a.updatedAt ?? a.createdAt ?? "0"));
       list = list.slice(0, o.limit);
       emit(ctx.format, list, () =>
-        renderTable(list.map((t) => ({ id: short(t.id), status: t.status, project: t.projectTitle, title: t.title.slice(0, 60), branch: t.branch ?? "", model: `${t.modelSelection?.model ?? ""}${effortOf(t.modelSelection) ? "@" + effortOf(t.modelSelection) : ""}`, updated: ago(t.updatedAt ?? t.createdAt) })),
+        renderTable(list.map((t) => ({ id: short(t.id), status: t.blockedBy ? `${t.status} (child ${short(t.blockedBy)})` : t.status, project: t.projectTitle, title: t.title.slice(0, 60), branch: t.branch ?? "", model: `${t.modelSelection?.model ?? ""}${effortOf(t.modelSelection) ? "@" + effortOf(t.modelSelection) : ""}`, updated: ago(t.updatedAt ?? t.createdAt) })),
           ["id", "status", "project", "title", "branch", "model", "updated"]));
     });
 
@@ -104,9 +131,10 @@ export function registerThreads(program: Command) {
       const p = detail.projection;
       const messages = recentMessages(p, o.messages);
       const latestRun = [...p.runs].sort((a, b) => a.ordinal - b.ordinal).at(-1) ?? null;
-      const out = { status: threadStatus(t), snapshotSequence: detail.snapshotSequence, thread: { ...p.thread, status: t.status, activeRunId: t.activeRunId, pendingRuntimeRequest: t.pendingRuntimeRequest ?? null }, latestRun, pendingRequests: p.runtimeRequests.filter((r) => r.status === "pending"), messages, messageCount: p.messages.length, runCount: p.runs.length };
+      const fam = familyStatus(t, shell.threads);
+      const out = { status: fam.status, ...(fam.blockedBy ? { blockedBy: fam.blockedBy } : {}), snapshotSequence: detail.snapshotSequence, thread: { ...p.thread, status: t.status, activeRunId: t.activeRunId, pendingRuntimeRequest: t.pendingRuntimeRequest ?? null }, latestRun, pendingRequests: p.runtimeRequests.filter((r) => r.status === "pending" && isActionableRequest(r)), messages, messageCount: p.messages.length, runCount: p.runs.length };
       emit(ctx.format, out, () => {
-        const head = [`id       ${t.id}`, `title    ${t.title}`, `status   ${threadStatus(t)}`, `project  ${t.projectId}`, `branch   ${t.branch ?? ""}`, `worktree ${t.worktreePath ?? ""}`, `model    ${t.modelSelection?.instanceId ?? ""}/${t.modelSelection?.model ?? ""}${effortOf(t.modelSelection) ? "@" + effortOf(t.modelSelection) : ""}`, `mode     ${String(t.runtimeMode ?? "")}/${String(t.interactionMode ?? "")}`, `runs     ${p.runs.length}  messages ${p.messages.length}`, ""];
+        const head = [`id       ${t.id}`, `title    ${t.title}`, `status   ${fam.status}${fam.blockedBy ? ` (child ${fam.blockedBy}: threads pending ${short(t.id)})` : ""}`, `project  ${t.projectId}`, `branch   ${t.branch ?? ""}`, `worktree ${t.worktreePath ?? ""}`, `model    ${t.modelSelection?.instanceId ?? ""}/${t.modelSelection?.model ?? ""}${effortOf(t.modelSelection) ? "@" + effortOf(t.modelSelection) : ""}`, `mode     ${String(t.runtimeMode ?? "")}/${String(t.interactionMode ?? "")}`, `runs     ${p.runs.length}  messages ${p.messages.length}`, ""];
         const msgs = messages.map((m) => `[${m.role}${m.streaming ? "…" : ""}] ${m.text.slice(0, 2000)}`);
         return [...head, ...msgs].join("\n");
       });
@@ -153,7 +181,7 @@ export function registerThreads(program: Command) {
       const shell = await api.shell(ctx.client);
       const t = matchThread(shell.threads, ref);
       const out = await waitForIdle(ctx.server, ctx.client.token, t.id, { timeoutMs: o.timeout * 1000, requireRunStart: o.requireRun || o.requireTurn === true, poll: shellPoller(ctx.client, t.id) });
-      emit(ctx.format, out, () => `${out.status} (${out.reason}) after ${out.events} events\n${out.lastAssistantText ? "\n" + out.lastAssistantText.slice(0, 3000) : ""}`);
+      emit(ctx.format, out, () => `${out.status} (${out.reason})${out.blockedBy ? ` in child ${out.blockedBy}` : ""} after ${out.events} events\n${out.lastAssistantText ? "\n" + out.lastAssistantText.slice(0, 3000) : ""}`);
       process.exitCode = exitCodeFor(out.reason);
     });
 
@@ -233,17 +261,21 @@ export function registerThreads(program: Command) {
 
   threads
     .command("pending <ref>")
-    .description("Show open approval / user-input requests the thread is blocked on")
+    .description("Show open approval / user-input requests the thread, or one of its delegated children, is blocked on")
     .action(async (ref: string) => {
       const ctx = await connect(program.opts<GlobalOpts>());
       const shell = await api.shell(ctx.client);
       const t = matchThread(shell.threads, ref);
-      const detail = await api.thread(ctx.client, t.id);
-      const out = { threadId: t.id, status: threadStatus(t), approvals: derivePendingApprovals(detail.projection), userInputs: derivePendingUserInputs(detail.projection) };
+      const fam = familyStatus(t, shell.threads);
+      const [own, ...children] = await familyPending(ctx, shell.threads, t);
+      const out = { threadId: t.id, status: fam.status, ...(fam.blockedBy ? { blockedBy: fam.blockedBy } : {}), approvals: own.approvals, userInputs: own.userInputs, children: children.filter((c) => c.approvals.length || c.userInputs.length) };
       emit(ctx.format, out, () => {
         const lines = [`status ${out.status}`];
-        for (const a of out.approvals) lines.push(`approval ${a.requestId}  ${a.requestKind ?? ""}  ${(a.detail ?? "").split("\n")[0].slice(0, 120)}  options: ${(a.options ?? []).map((o) => o.decision).join("|") || APPROVAL_DECISIONS.join("|")}`);
-        for (const u of out.userInputs) for (const q of u.questions) lines.push(`user-input ${u.requestId}  [${q.id}] ${q.question}  options: ${q.options.map((o) => o.label).join(" | ")}${q.multiSelect ? " (multi)" : ""}`);
+        for (const f of [own, ...out.children]) {
+          const where = f.child ? `  [child ${short(f.threadId)} ${f.title.slice(0, 40)}]` : "";
+          for (const a of f.approvals) lines.push(`approval ${a.requestId}${where}  ${a.requestKind ?? ""}  ${(a.detail ?? "").split("\n")[0].slice(0, 120)}${a.reason ? `  reason: ${a.reason.slice(0, 80)}` : ""}  options: ${(a.options ?? []).map((o) => o.decision).join("|") || APPROVAL_DECISIONS.join("|")}${a.supportsFeedback ? "  (--feedback ok)" : ""}${a.responseCapability === "not_resumable" ? "  (session gone)" : ""}`);
+          for (const u of f.userInputs) for (const q of u.questions) lines.push(`user-input ${u.requestId}${where}  [${q.id}] ${q.question}  options: ${q.options.map((o) => o.label).join(" | ")}${q.multiSelect ? " (multi)" : ""}${u.blocking ? "" : " (async)"}`);
+        }
         if (lines.length === 1) lines.push("(nothing pending)");
         return lines.join("\n");
       });
@@ -251,26 +283,28 @@ export function registerThreads(program: Command) {
 
   threads
     .command("approve <ref>")
-    .description("Respond to a pending approval request (default: the oldest one)")
+    .description("Respond to a pending approval request: the thread's own oldest, else a delegated child's (or -r <requestId>)")
     .option("-d, --decision <d>", APPROVAL_DECISIONS_ALLOWED.join("|"), "accept")
-    .option("-r, --request <id>", "specific requestId (see `threads pending`)")
-    .action(async (ref: string, o: { decision: string; request?: string }) => {
+    .option("-r, --request <id>", "specific requestId (see `threads pending`), also one of a child thread")
+    .option("--feedback <text>", "tell the agent why (typically with -d decline); only where `threads pending` shows --feedback ok")
+    .action(async (ref: string, o: { decision: string; request?: string; feedback?: string }) => {
       const g = program.opts<GlobalOpts>();
       if (!(APPROVAL_DECISIONS_ALLOWED as readonly string[]).includes(o.decision)) throw new CliError("invalid_option", `invalid decision. Allowed: ${APPROVAL_DECISIONS_ALLOWED.join(", ")}`, { option: "decision", allowed: APPROVAL_DECISIONS_ALLOWED });
       const ctx = await connect(g, { write: true });
       const shell = await withAuthRetry(ctx, g, api.shell);
       const t = matchThread(shell.threads, ref);
-      const detail = await api.thread(ctx.client, t.id);
-      const pending = derivePendingApprovals(detail.projection);
-      const target = o.request ? pending.find((p) => p.requestId === o.request) : pending[0];
-      if (!target) throw new CliError("nothing_pending", o.request ? `no pending approval ${o.request}` : `thread ${short(t.id)} has no pending approvals`, { threadId: t.id, requestId: o.request });
-      const res = await dispatch(ctx.client, { type: "runtime-request.respond", commandId: uuid(), threadId: t.id, requestId: target.requestId, decision: o.decision });
-      emit(ctx.format, { threadId: t.id, requestId: target.requestId, decision: o.decision, sequence: res.sequence }, () => `${o.decision} → ${target.requestId} (${target.requestKind ?? ""} ${(target.detail ?? "").split("\n")[0].slice(0, 80)})`);
+      const hit = pickRequest<PendingApproval>(await familyPending(ctx, shell.threads, t), "approvals", o.request);
+      if (!hit) throw new CliError("nothing_pending", o.request ? `no pending approval ${o.request}` : `thread ${short(t.id)} and its children have no pending approvals`, { threadId: t.id, requestId: o.request });
+      const target = hit.request;
+      const feedback = o.feedback?.trim();
+      if (feedback && !target.supportsFeedback) throw new CliError("invalid_option", `request ${target.requestId} does not accept feedback (provider session ${target.responseCapability})`, { option: "feedback", requestId: target.requestId });
+      const res = await dispatch(ctx.client, { type: "runtime-request.respond", commandId: uuid(), threadId: hit.threadId, requestId: target.requestId, decision: o.decision, ...(feedback ? { feedback } : {}) });
+      emit(ctx.format, { threadId: hit.threadId, ...(hit.threadId !== t.id ? { parentThreadId: t.id } : {}), requestId: target.requestId, decision: o.decision, ...(feedback ? { feedback } : {}), sequence: res.sequence }, () => `${o.decision} → ${target.requestId}${hit.threadId !== t.id ? ` (child ${short(hit.threadId)})` : ""} (${target.requestKind ?? ""} ${(target.detail ?? "").split("\n")[0].slice(0, 80)})`);
     });
 
   threads
     .command("respond <ref>")
-    .description("Answer a pending user-input request. Use --answer <questionId>=<option label> per question, or --json '{...}'.")
+    .description("Answer a pending user-input request (the thread's own, else a delegated child's). Use --answer <questionId>=<option label> per question, or --json '{...}'.")
     .option("-r, --request <id>", "specific requestId (default: oldest pending)")
     .option("--answer <kv...>", "questionId=answer (repeatable; comma-separate for multi-select)")
     .addOption(new Option("-a <kv...>", "deprecated alias of --answer").hideHelp())
@@ -281,10 +315,9 @@ export function registerThreads(program: Command) {
       const ctx = await connect(g, { write: true });
       const shell = await withAuthRetry(ctx, g, api.shell);
       const t = matchThread(shell.threads, ref);
-      const detail = await api.thread(ctx.client, t.id);
-      const pending = derivePendingUserInputs(detail.projection);
-      const target = o.request ? pending.find((p) => p.requestId === o.request) : pending[0];
-      if (!target) throw new CliError("nothing_pending", o.request ? `no pending user-input ${o.request}` : `thread ${short(t.id)} has no pending user-input requests`, { threadId: t.id, requestId: o.request });
+      const hit = pickRequest<PendingUserInput>(await familyPending(ctx, shell.threads, t), "userInputs", o.request);
+      if (!hit) throw new CliError("nothing_pending", o.request ? `no pending user-input ${o.request}` : `thread ${short(t.id)} and its children have no pending user-input requests`, { threadId: t.id, requestId: o.request });
+      const target = hit.request;
       let answers: Record<string, unknown> = {};
       if (o.json) answers = JSON.parse(o.json) as Record<string, unknown>;
       for (const kv of o.answer ?? []) {
@@ -296,8 +329,8 @@ export function registerThreads(program: Command) {
       }
       const missing = target.questions.filter((q) => !(q.id in answers));
       if (missing.length) throw new Error(`unanswered questions: ${missing.map((q) => `${q.id} (${q.options.map((x) => x.label).join(" | ")})`).join("; ")}`);
-      const res = await dispatch(ctx.client, { type: "runtime-request.respond", commandId: uuid(), threadId: t.id, requestId: target.requestId, answers });
-      emit(ctx.format, { threadId: t.id, requestId: target.requestId, answers, sequence: res.sequence }, () => `answered ${target.requestId}`);
+      const res = await dispatch(ctx.client, { type: "runtime-request.respond", commandId: uuid(), threadId: hit.threadId, requestId: target.requestId, answers });
+      emit(ctx.format, { threadId: hit.threadId, ...(hit.threadId !== t.id ? { parentThreadId: t.id } : {}), requestId: target.requestId, answers, sequence: res.sequence }, () => `answered ${target.requestId}${hit.threadId !== t.id ? ` (child ${short(hit.threadId)})` : ""}`);
     });
 
   threads
@@ -328,15 +361,23 @@ export function registerThreads(program: Command) {
 
   threads
     .command("interrupt <ref>")
-    .description("Interrupt the active run (thread.stop); queued messages stay queued")
-    .action(async (ref: string) => {
+    .description("Stop the active run (thread.stop), and like the app's Stop also every task it delegated; queued messages stay queued")
+    .option("--keep-tasks", "leave delegated tasks (delegate_task children) running", false)
+    .option("--force", "kill the agent process (for a run that ignores Stop); T3 Code ≥ 0.1.7", false)
+    .action(async (ref: string, o: { keepTasks: boolean; force: boolean }) => {
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g, { write: true });
       const shell = await withAuthRetry(ctx, g, api.shell);
       const t = matchThread(shell.threads, ref);
       if (!t.activeRunId) throw new CliError("thread_idle", `thread ${short(t.id)} has no active run`, { threadId: t.id, status: threadStatus(t) });
-      const res = await dispatch(ctx.client, { type: "thread.stop", commandId: uuid(), threadId: t.id, reason: "t3ctl interrupt" });
-      emit(ctx.format, { threadId: t.id, runId: t.activeRunId, sequence: res.sequence }, () => `interrupt requested for ${t.id} (run ${t.activeRunId})`);
+      if (o.force) {
+        if (ctx.server.descriptor.capabilities?.threadForceStop !== true) throw new CliError("incompatible_server", "this T3 Code does not support force stop (needs 0.1.7+)", { capability: "threadForceStop" }, INCOMPATIBLE_EXIT);
+        const res = await withAuthRetry(ctx, g, (c) => rpc<{ outcome: string; sharedWithThreadIds: string[] }>(c, "orchestration.forceStopThread", { threadId: t.id, runId: t.activeRunId }));
+        emit(ctx.format, { threadId: t.id, runId: t.activeRunId, ...res }, () => `force stopped ${t.id} (run ${t.activeRunId}): ${res.outcome}${res.sharedWithThreadIds.length ? `; agent shared with ${res.sharedWithThreadIds.map((x) => short(x)).join(", ")}, only this turn ended` : ""}`);
+        return;
+      }
+      const res = await dispatch(ctx.client, { type: "thread.stop", commandId: uuid(), threadId: t.id, reason: "t3ctl interrupt", ...(o.keepTasks ? { stopDelegatedTasks: false } : {}) });
+      emit(ctx.format, { threadId: t.id, runId: t.activeRunId, stopDelegatedTasks: !o.keepTasks, sequence: res.sequence }, () => `interrupt requested for ${t.id} (run ${t.activeRunId})${o.keepTasks ? ", delegated tasks kept" : ""}`);
     });
 
   threads

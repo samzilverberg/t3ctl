@@ -29,7 +29,7 @@ report the message to the user and stop.
 | Thread + last N messages | `t3ctl threads show <ref> -n 4` → `{status, thread, latestRun, pendingRequests, messages:[{role,text,createdAt}]}` |
 | Find by content | `t3ctl threads search "<words>"` → `[{threadId,source,snippet}]` |
 
-`status`: `running`, `idle`, `needs-approval`, `needs-input`, `error`, `interrupted`, `archived`, `new`.
+`status`: `running`, `idle`, `needs-approval`, `needs-input`, `error`, `interrupted`, `archived`, `new`. With `blockedBy: <childId>` the human is needed by a delegated child, not the thread itself; `threads pending/approve <parent>` reach it.
 `<ref>` = full id, id prefix, or exact title (projects also take their workspace path, e.g. `.`). An empty ref is an
 error, never "the first one". Prefer full ids in anything you write down.
 
@@ -41,13 +41,13 @@ error, never "the first one". Prefer full ids in anything you write down.
 | …and block until first turn ends | add `--wait --timeout 1800` → `{…, wait:{status,reason,lastAssistantText}}` |
 | Follow-up | `t3ctl threads send <ref> "<prompt>" [--wait]` (refused while running: add `--queue` to run after, `--steer` to inject) |
 | Block on a running thread | `t3ctl threads wait <ref> --timeout 1800` (exit 0 idle · 2 needs-human · 3 error · 4 timeout) |
-| What is it blocked on | `t3ctl threads pending <ref>` → `{approvals:[{requestId,requestKind,detail,options}], userInputs:[{requestId,questions:[{id,question,options:[{label}]}]}]}` |
-| Approve / decline | `t3ctl threads approve <ref> -d accept` (or `decline`, `acceptForSession`, `acceptAlways`; `-r <requestId>` to pick one) |
+| What is it blocked on | `t3ctl threads pending <ref>` → `{approvals:[{requestId,requestKind,detail,reason,options,supportsFeedback}], userInputs:[{requestId,questions:[{id,question,options:[{label}]}]}], children:[{threadId,title,approvals,userInputs}]}` (a delegated child's requests, when `status` came with `blockedBy`) |
+| Approve / decline | `t3ctl threads approve <ref> -d accept` (or `decline`, `acceptForSession`, `acceptAlways`; `-r <requestId>` to pick one, a child's too; `--feedback "<why>"` where `supportsFeedback`, typically with `decline`) |
 | Answer questions | `t3ctl threads respond <ref> --answer <questionId>=<option label> …` |
 | Hide until later (visibility only) | `t3ctl threads snooze <ref> -u "tomorrow 09:00"` / `t3ctl threads unsnooze <ref>` |
 | Several threads at once (2-5) | `t3ctl threads new -p <project> -m <model> -e <effort> --batch - <<< '["<prompt 1>", {"prompt": "<prompt 2>", "title": "<title>"}]'` → `[{threadId,…}, …]` |
 | Create without starting | `t3ctl threads new -p <project> --draft -t "<title>" [--snooze 2h]` |
-| Done for now / tidy | `t3ctl threads settle <ref>` (keeps it, leaves inbox), `t3ctl threads archive <ref>`, `t3ctl threads interrupt <ref>` |
+| Done for now / tidy | `t3ctl threads settle <ref>` (keeps it, leaves inbox), `t3ctl threads archive <ref>`, `t3ctl threads interrupt <ref>` (also stops its delegated tasks; `--keep-tasks` to keep them, `--force` for a run that ignores Stop) |
 | Register a repo | `t3ctl projects add <path> [-m model -e effort]` |
 | **One-time** prompt later ("in 2h", "tomorrow 09:00", a date) | `t3ctl schedule add --once "<when>" --thread <ref> "<prompt>"` (or `-p <project>` for a new thread) → `{id, schedule:{type:"once",runAt}, nextRunAt}`; `<when>` = `30m`/`2h`, `17:30`, `"tomorrow 09:00"`, ISO. A T3 Code one-time task (needs T3 Code ≥ 0.1.7), queued if the thread is busy; the MCP `schedule_task` tool with a `once` schedule is equivalent. Not `CronCreate`/`ScheduleWakeup` (die with the Claude process). |
 | Recurring task (T3 Code scheduler) | `t3ctl schedule add --at HH:MM [--days mon-fri] \| --every 2h \| --cron "0 9 * * 1-5" -p <project> [-m model -e effort -t title] "<prompt>"` → `{id, schedule, nextRunAt}`; a new thread per run. Same objects as the MCP `schedule_task` tools; either is fine. |

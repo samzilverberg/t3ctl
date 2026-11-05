@@ -50,14 +50,24 @@ export function matchThread(threads: ShellThread[], ref: string): ShellThread {
   if (!t) throw new CliError("thread_not_found", `thread not found: ${ref}`, { ref });
   return t;
 }
-/** id, id prefix, exact title, or workspace root (a path: contains `/`, or is `.` / `..`; relative to cwd). */
-export function matchProject(projects: ShellProject[], ref: string): ShellProject {
-  if (!ref.trim()) throw new CliError("project_not_found", `empty project ref. Known: ${projects.map((x) => x.title).join(", ")}`, { ref, known: projects.map((x) => x.title) });
+/**
+ * id, id prefix, exact title, or workspace root (a path: contains `/`, or is `.` / `..`; relative to cwd).
+ * Archived projects (T3 Code 0.1.6+) leave the app's pickers, so they only match with `includeArchived`; otherwise a
+ * ref that names one exits `project_archived` instead of quietly starting work there.
+ */
+export function matchProject(projects: ShellProject[], ref: string, { includeArchived = false }: { includeArchived?: boolean } = {}): ShellProject {
+  const active = projects.filter((x) => !x.archivedAt);
+  const known = active.map((x) => x.title);
+  if (!ref.trim()) throw new CliError("project_not_found", `empty project ref. Known: ${known.join(", ")}`, { ref, known });
   const path = ref.includes("/") || ref === "." || ref === ".." ? resolve(ref) : undefined;
-  const p = projects.find((x) => x.id === ref) ?? projects.find((x) => x.id.startsWith(ref)) ?? projects.find((x) => x.title === ref)
-    ?? (path ? projects.find((x) => x.workspaceRoot === path) : undefined);
-  if (!p) throw new CliError("project_not_found", `project not found: ${ref}. Known: ${projects.map((x) => x.title).join(", ")}`, { ref, known: projects.map((x) => x.title) });
-  return p;
+  const find = (xs: ShellProject[]) => xs.find((x) => x.id === ref) ?? xs.find((x) => x.id.startsWith(ref)) ?? xs.find((x) => x.title === ref)
+    ?? (path ? xs.find((x) => x.workspaceRoot === path) : undefined);
+  const p = find(active);
+  if (p) return p;
+  const archived = find(projects.filter((x) => x.archivedAt));
+  if (archived && includeArchived) return archived;
+  if (archived) throw new CliError("project_archived", `project ${archived.title} is archived; unarchive it in T3 Code first`, { ref, projectId: archived.id, archivedAt: archived.archivedAt });
+  throw new CliError("project_not_found", `project not found: ${ref}. Known: ${known.join(", ")}`, { ref, known });
 }
 
 function gitCurrentBranch(cwd: string): string | undefined {

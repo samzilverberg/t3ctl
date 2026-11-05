@@ -76,7 +76,7 @@ export function registerSchedule(program: Command) {
       const [shell, { tasks }] = await Promise.all([withAuthRetry(ctx, g, api.shell), withAuthRetry(ctx, g, listTasks)]);
       const projects = new Map(shell.projects.map((p) => [p.id, p.title]));
       let list = tasks;
-      if (o.project) { const p = matchProject(shell.projects, o.project); list = list.filter((t) => t.projectId === p.id); }
+      if (o.project) { const p = matchProject(shell.projects, o.project, { includeArchived: true }); list = list.filter((t) => t.projectId === p.id); }
       list = [...list].sort((a, b) => (a.nextRunAt ?? "~").localeCompare(b.nextRunAt ?? "~"));
       const legacy = legacyState();
       emit(ctx.format, { tasks: list.map((t) => ({ ...t, projectTitle: projects.get(t.projectId) ?? "" })), ...(legacy ? { legacy } : {}) }, () => {

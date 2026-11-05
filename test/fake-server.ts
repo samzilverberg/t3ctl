@@ -29,6 +29,8 @@ export interface Fake {
   /** `/api/projects/mutate` bodies. */
   mutations: Array<Record<string, unknown>>;
   tasks: ScheduledTask[];
+  /** Per-thread `runtimeRequests` / `turnItems` served by the thread detail route. */
+  requests: Map<string, { runtimeRequests: unknown[]; turnItems: unknown[] }>;
   /** Make the n-th dispatch/launch from now (1-based) fail with an RPC Failure. */
   failDispatch?: number;
   /** Descriptor fields to override (e.g. an old `serverVersion`). */
@@ -50,6 +52,7 @@ export async function startFake(): Promise<Fake> {
   const launches: Array<Record<string, unknown>> = [];
   const mutations: Array<Record<string, unknown>> = [];
   const tasks: ScheduledTask[] = [];
+  const requests = new Map<string, { runtimeRequests: unknown[]; turnItems: unknown[] }>();
   let seq = 0;
   let n = 0;
   const descriptor: Record<string, unknown> = { environmentId: "fake-env", label: "fake", platform: { os: "darwin", arch: "arm64" }, serverVersion: "0.1.1", orchestrationProtocolVersion: 2, capabilities: { serverSelfUpdate: "desktop-managed" } };
@@ -72,7 +75,7 @@ export async function startFake(): Promise<Fake> {
       const m = /^\/api\/orchestration\/threads\/([^/]+)$/.exec(url.pathname);
       if (m) {
         const t = threads.find((x) => x.id === decodeURIComponent(m[1]));
-        return t ? json({ snapshotSequence: seq, projection: { thread: t, runs: [], attempts: [], runtimeRequests: [], messages: messages.get(t.id) ?? [], turnItems: [] } }) : json({ error: "not found" }, 404);
+        return t ? json({ snapshotSequence: seq, projection: { thread: t, runs: [], attempts: [], runtimeRequests: [], messages: messages.get(t.id) ?? [], turnItems: [], ...requests.get(t.id) } }) : json({ error: "not found" }, 404);
       }
     }
     json({ error: "not found" }, 404);
@@ -123,6 +126,7 @@ export async function startFake(): Promise<Fake> {
           if (p.type === "thread.archive") { const t = threads.find((x) => x.id === p.threadId); if (t) t.archivedAt = new Date().toISOString(); }
           return ok({ sequence: ++seq });
         }
+        case "orchestration.forceStopThread": { commands.push({ type: "orchestration.forceStopThread", ...p }); return ok({ outcome: "killed", sharedWithThreadIds: [] }); }
         // 0.1.7 has no unary list; the subscription's first chunk is the snapshot (the client interrupts after it).
         case "scheduledTasks.subscribe": return void ws.send(JSON.stringify({ _tag: "Chunk", requestId: f.id, values: [{ tasks }] }));
         case "scheduledTasks.upsert": {
@@ -148,7 +152,7 @@ export async function startFake(): Promise<Fake> {
   const server = { origin, descriptor: { environmentId: "fake-env", label: "fake", platform: { os: "darwin", arch: "arm64" }, serverVersion: "0.1.1", orchestrationProtocolVersion: 2, capabilities: {} }, source: "env" as const, isDesktopBackend: true, degraded: false };
 
   const fake: Fake = {
-    origin, project, threads, messages, commands, launches, mutations, tasks, descriptor,
+    origin, project, threads, messages, commands, launches, mutations, tasks, requests, descriptor,
     ctx: { server, client: makeClient(server, "fake-token"), format: "json" },
     seed(title, prompt, secondsAgo, extra = {}) {
       const t = addThread(`00000000-0000-0000-0000-${String(++n).padStart(12, "0")}`, title, { createdAt: new Date(Date.now() - secondsAgo * 1000).toISOString(), ...extra });

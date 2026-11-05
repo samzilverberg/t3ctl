@@ -28,10 +28,24 @@ test("pending user inputs: user_input requests with their questions", () => {
   assert.equal(q.multiSelect, false);
 });
 
-test("a request without a matching turn item still shows up (kind only)", () => {
+test("without its turn item an approval still shows up (kind only); a question does not (the app's rule)", () => {
   const stripped = { runtimeRequests: p.runtimeRequests, turnItems: [] };
   assert.deepEqual(derivePendingApprovals(stripped).map((a) => [a.requestId, a.requestKind, a.detail]), [["rr-approval-1", "file-change", undefined]]);
-  assert.deepEqual(derivePendingUserInputs(stripped).map((u) => [u.requestId, u.questions.length]), [["rr-user-input-1", 0]]);
+  assert.deepEqual(derivePendingUserInputs(stripped), []);
+});
+
+test("internal request kinds are never pending for a human; feedback and async questions are flagged", () => {
+  const live = { type: "live", providerSessionId: "s", supportsFeedback: true };
+  const reqs = [
+    { id: "auth", kind: "auth_refresh", status: "pending", createdAt: "2026-01-01T00:00:00Z", responseCapability: live },
+    { id: "dyn", kind: "dynamic_tool_call", status: "pending", createdAt: "2026-01-01T00:00:00Z", responseCapability: live },
+    { id: "cmd", kind: "command", status: "pending", createdAt: "2026-01-01T00:00:01Z", responseCapability: live },
+    { id: "q", kind: "user_input", status: "pending", createdAt: "2026-01-01T00:00:02Z", responseCapability: { type: "message" } },
+  ];
+  const items = [{ id: "i1", type: "user_input_request", requestId: "q", questions: [{ id: "a", question: "Which?", options: [{ label: "x" }] }] }];
+  const approvals = derivePendingApprovals({ runtimeRequests: reqs, turnItems: items });
+  assert.deepEqual(approvals.map((a) => [a.requestId, a.supportsFeedback, a.responseCapability]), [["cmd", true, "live"]]);
+  assert.deepEqual(derivePendingUserInputs({ runtimeRequests: reqs, turnItems: items }).map((u) => [u.requestId, u.blocking, u.responseCapability]), [["q", false, "message"]]);
 });
 
 test("nothing pending once requests are resolved", () => {

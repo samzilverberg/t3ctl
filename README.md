@@ -56,6 +56,6 @@ pnpm test           # unit tests against recorded fixtures (test/fixtures)
 pnpm build          # required after changes: the global link runs dist/
 ```
 
-Status: v0.7.0, verified against T3 Code 0.1.7 (2026-11-05). Minimum supported T3 Code: **0.1.0**
+Status: v0.7.1, verified against T3 Code 0.1.7 (2026-11-05). Minimum supported T3 Code: **0.1.0**
 (orchestration protocol 2, checked on every connect). The protocol is internal to T3 Code; expect to re-check
 after app updates. MIT.

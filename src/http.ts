@@ -58,7 +58,7 @@ export interface AuthSessionState {
   expiresAt?: string;
   [k: string]: unknown;
 }
-export interface ShellProject { id: string; title: string; workspaceRoot: string; defaultModelSelection?: unknown; defaultThreadEnvMode?: string | null; [k: string]: unknown }
+export interface ShellProject { id: string; title: string; workspaceRoot: string; defaultModelSelection?: unknown; defaultThreadEnvMode?: string | null; pinnedAt?: string | null; archivedAt?: string | null; [k: string]: unknown }
 export type Project = ShellProject;
 
 export type RunStatus = "preparing" | "queued" | "starting" | "running" | "waiting" | "completed" | "interrupted" | "failed" | "cancelled" | "rolled_back";
@@ -101,7 +101,7 @@ export interface ShellSnapshot { snapshotSequence: number; projects: ShellProjec
 
 export interface Message { id: string; threadId: string; runId?: string | null; role: "user" | "assistant" | "system" | string; text: string; createdAt?: string; updatedAt?: string; streaming?: boolean; [k: string]: unknown }
 export interface Run { id: string; threadId: string; ordinal: number; status: RunStatus | string; requestedAt?: string; startedAt?: string | null; completedAt?: string | null; [k: string]: unknown }
-export interface RuntimeRequest { id: string; kind: RuntimeRequestKind; status: "pending" | "resolved" | "expired" | "cancelled" | string; createdAt?: string; resolvedAt?: string | null; [k: string]: unknown }
+export interface RuntimeRequest { id: string; kind: RuntimeRequestKind; status: "pending" | "resolved" | "expired" | "cancelled" | string; createdAt?: string; resolvedAt?: string | null; responseCapability?: { type?: "live" | "message" | "not_resumable" | string; supportsFeedback?: boolean; reason?: string }; [k: string]: unknown }
 export interface TurnItem { id: string; type: string; runId?: string | null; requestId?: string; requestKind?: string; prompt?: string; appName?: string; options?: Array<{ decision: string; label: string; warning?: string }>; questions?: Array<{ id: string; header?: string; question: string; options: Array<{ label: string; description?: string }>; multiSelect?: boolean }>; [k: string]: unknown }
 /** `OrchestrationV2ThreadProjection`, the parts we read. */
 export interface ThreadProjection { thread: ShellThread & { [k: string]: unknown }; runs: Run[]; runtimeRequests: RuntimeRequest[]; messages: Message[]; turnItems: TurnItem[]; [k: string]: unknown }
