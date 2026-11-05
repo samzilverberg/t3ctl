@@ -87,8 +87,16 @@ export interface ShellThread {
   lastError?: string | null;
   pendingRuntimeRequest?: { id: string; kind: RuntimeRequestKind; createdAt?: string; blocking?: boolean } | null;
   latestVisibleMessage?: { id: string; role: string; text: string; updatedAt?: string } | null;
+  lineage?: { parentThreadId?: string | null; relationshipToParent?: "fork" | "subagent" | null | string; rootThreadId?: string; sideChat?: boolean };
   [k: string]: unknown;
 }
+
+/**
+ * The app's own rule (`isListedThreadLineage`, contracts orchestrationV2.ts): subagent children (provider-native and
+ * `delegate_task`) and side chats live inside their parent's view, never in thread lists. Ids still resolve.
+ */
+export const isListedThread = (t: Pick<ShellThread, "lineage">): boolean =>
+  t.lineage?.relationshipToParent !== "subagent" && t.lineage?.sideChat !== true;
 export interface ShellSnapshot { snapshotSequence: number; projects: ShellProject[]; threads: ShellThread[]; archivedThreads?: ShellThread[]; [k: string]: unknown }
 
 export interface Message { id: string; threadId: string; runId?: string | null; role: "user" | "assistant" | "system" | string; text: string; createdAt?: string; updatedAt?: string; streaming?: boolean; [k: string]: unknown }
@@ -109,6 +117,17 @@ export async function rpc<T>(c: Client, tag: string, payload: unknown): Promise<
   const sock = new RpcSocket(c.server, c.token);
   try {
     return await sock.request<T>(tag, payload);
+  } finally { sock.close(); }
+}
+
+/** First value of a streaming RPC (a snapshot-then-updates subscription read once), then interrupt it. */
+export async function rpcFirst<T>(c: Client, tag: string, payload: unknown): Promise<T> {
+  const { RpcSocket } = await import("./ws.js");
+  const sock = new RpcSocket(c.server, c.token);
+  const ac = new AbortController();
+  try {
+    for await (const item of sock.subscribe<T>(tag, payload, ac.signal)) { ac.abort(); return item; }
+    throw new Error(`${tag} ended without a value`);
   } finally { sock.close(); }
 }
 

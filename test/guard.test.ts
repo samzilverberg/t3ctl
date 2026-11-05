@@ -37,6 +37,16 @@ test("recentThreads: same project, inside the window, not archived, newest first
   assert.deepEqual(recentThreads(ts, "p", 60, now).map((t) => t.id), ["new", "mid"]);
 });
 
+test("recentThreads ignores subagent children and side chats (an agent fanning out must not rate-limit the user)", () => {
+  const ts = [
+    th("top", "a", 5),
+    { ...th("fork", "b", 5), lineage: { parentThreadId: "top", relationshipToParent: "fork", rootThreadId: "top" } },
+    { ...th("sub", "c", 5), lineage: { parentThreadId: "top", relationshipToParent: "subagent", rootThreadId: "top" } },
+    { ...th("side", "d", 5), lineage: { parentThreadId: "top", relationshipToParent: null, rootThreadId: "top", sideChat: true } },
+  ];
+  assert.deepEqual(recentThreads(ts, "p", 60, now).map((t) => t.id).sort(), ["fork", "top"]);
+});
+
 test("findDuplicate: compares prompts when both exist, else titles; returns the best match", () => {
   const a = th("a", "Fix CJS build", 11), b = th("b", "Scheduler docs", 3);
   const d = findDuplicate([{ thread: a, prompt: PROMPT_A }, { thread: b, prompt: PROMPT_OTHER }], { title: "whatever", text: PROMPT_B }, now, cfg);

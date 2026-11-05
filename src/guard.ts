@@ -12,7 +12,7 @@
  */
 import { readConfig } from "./config.js";
 import { CliError } from "./errors.js";
-import { api, type Client, type ShellThread } from "./http.js";
+import { api, isListedThread, type Client, type ShellThread } from "./http.js";
 import { short } from "./output.js";
 
 export interface GuardConfig {
@@ -66,7 +66,7 @@ const ageSec = (t: ShellThread, now: Date) => (now.getTime() - Date.parse(t.crea
 /** Threads in `projectId` created within `windowSec` of `now`, newest first. */
 export function recentThreads(threads: ShellThread[], projectId: string, windowSec: number, now: Date): ShellThread[] {
   return threads
-    .filter((t) => t.projectId === projectId && !t.archivedAt && ageSec(t, now) <= windowSec)
+    .filter((t) => t.projectId === projectId && !t.archivedAt && isListedThread(t) && ageSec(t, now) <= windowSec)
     .sort((a, b) => ageSec(a, now) - ageSec(b, now));
 }
 

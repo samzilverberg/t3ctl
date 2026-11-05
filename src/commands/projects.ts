@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { connect, type GlobalOpts } from "../context.js";
-import { api } from "../http.js";
+import { api, isListedThread } from "../http.js";
 import { resolve } from "node:path";
 import { matchProject } from "../ops.js";
 import { existsSync, statSync } from "node:fs";
@@ -20,7 +20,7 @@ export function registerProjects(program: Command) {
       const { client, format } = await connect(program.opts<GlobalOpts>());
       const shell = await api.shell(client);
       const counts = new Map<string, number>();
-      for (const t of shell.threads) counts.set(t.projectId, (counts.get(t.projectId) ?? 0) + 1);
+      for (const t of shell.threads.filter(isListedThread)) counts.set(t.projectId, (counts.get(t.projectId) ?? 0) + 1);
       const rows = shell.projects.map((p) => ({ ...p, threadCount: counts.get(p.id) ?? 0 }));
       emit(format, rows, () =>
         renderTable(rows.map((p) => ({ id: short(p.id), title: p.title, threads: p.threadCount, workspaceRoot: p.workspaceRoot })), ["id", "title", "threads", "workspaceRoot"]));

@@ -2,19 +2,22 @@
  * `t3ctl schedule` is a thin client of T3 Code's own scheduler (0.1+): tasks live in the app's SQLite and are
  * fired by the server (`scheduledTasks.*` RPCs, the same backend the desktop UI and the MCP `schedule_task` tool
  * use). This module holds the pure parts: schedule parsing/rendering, cron → T3 schedule conversion, and reading
- * the legacy client-side job file that pre-0.5 t3ctl kept for its launchd ticker (for `schedule migrate`).
+ * the job files older t3ctl versions fired from a launchd ticker (for `schedule migrate`): schedule.json (≤ 0.4,
+ * recurring + one-shots) and once.json (0.6, one-shots, before T3 Code 0.1.7 had `once` schedules).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR } from "./config.js";
 import { CliError } from "./errors.js";
+import { parseWhen } from "./time.js";
 
 export type Schedule =
   | { type: "interval"; everyMs: number }
   | { type: "fixed_time"; timeOfDay: string; weekdays?: number[] }
+  | { type: "once"; runAt: string }
   | { type: "webhook"; signature: null | Record<string, unknown>; [k: string]: unknown };
 
-/** `ScheduledTask` as returned by `scheduledTasks.list` (fields we render; the rest passes through). */
+/** `ScheduledTask` as returned by `scheduledTasks.subscribe` (fields we render; the rest passes through). */
 export interface ScheduledTask {
   id: string;
   title: string;
@@ -41,6 +44,8 @@ export interface ScheduledTask {
 }
 
 export const MIN_INTERVAL_MS = 60_000;
+/** One-time schedules (`{ type: "once", runAt }`) arrived in T3 Code 0.1.7 (pingdotgg/t3code#28104). */
+export const ONCE_MIN_SERVER_VERSION = "0.1.7";
 
 /** Parse a duration like 30m / 2h / 1d into seconds (bare number = minutes). */
 export function parseDuration(s: string): number {
@@ -94,6 +99,13 @@ export function fixedTimeSchedule(time: string, days?: string): Schedule {
   return { type: "fixed_time", timeOfDay: parseTimeOfDay(time), ...(weekdays ? { weekdays } : {}) };
 }
 
+/** `--once <when>` (ISO, 30m/2h/3d, HH:MM, "tomorrow [HH:MM]") → a server one-time schedule; must lie in the future. */
+export function onceSchedule(when: string, now = new Date()): Schedule {
+  const runAt = parseWhen(when, now);
+  if (Date.parse(runAt) <= now.getTime()) throw new CliError("invalid_option", `--once ${when} is in the past (${runAt})`, { option: "once", runAt });
+  return { type: "once", runAt };
+}
+
 /**
  * Translate the subset of cron that T3 Code's scheduler can express:
  *   `@hourly` / `@daily` / `@weekly` / `@weekdays`, `*\/N * * * *` and `0 *\/N * * *` → interval,
@@ -132,21 +144,34 @@ export function describeSchedule(s: Schedule): string {
     return `${days} ${s.timeOfDay}`;
   }
   if (s.type === "webhook") return "webhook";
+  if (s.type === "once") return `once ${s.runAt.replace(/\.\d{3}Z$/, "Z")}`;
   return JSON.stringify(s);
 }
 
+const TASK_ID_PREFIX = "scheduled-task:";
+
+/** Task ids are `scheduled-task:<uuid>`; tables show (and refs accept) the uuid part. */
+export function shortTaskId(id: string): string { return id.replace(TASK_ID_PREFIX, "").slice(0, 8); }
+
 export function matchTask(tasks: ScheduledTask[], ref: string): ScheduledTask {
   if (!ref.trim()) throw new CliError("task_not_found", "empty task ref", { ref });
-  const t = tasks.find((x) => x.id === ref) ?? tasks.find((x) => x.id.startsWith(ref)) ?? tasks.find((x) => x.title === ref);
+  const bare = (id: string) => id.replace(TASK_ID_PREFIX, "");
+  const t = tasks.find((x) => x.id === ref) ?? tasks.find((x) => x.id.startsWith(ref) || bare(x.id).startsWith(ref)) ?? tasks.find((x) => x.title === ref);
   if (!t) throw new CliError("task_not_found", `scheduled task not found: ${ref}`, { ref, known: tasks.map((x) => ({ id: x.id, title: x.title })) });
   return t;
 }
 
-// ---- Legacy client-side job file (t3ctl ≤ 0.4, launchd ticker) ----
+// ---- Legacy client-side job files (fired by the retired launchd ticker) ----
 
 export const LEGACY_SCHEDULE_PATH = join(CONFIG_DIR, "schedule.json");
+export const LEGACY_ONCE_PATH = join(CONFIG_DIR, "once.json");
 export const LEGACY_LOG_PATH = join(CONFIG_DIR, "scheduler.log");
 
+/** Target fields shared by both legacy formats. */
+interface LegacyNew { project: string; projectTitle?: string; text: string; model?: string; effort?: string; title?: string; env?: string; base?: string; branch?: string; runtimeMode?: string; interactionMode?: string }
+interface LegacySend { thread: string; text: string; model?: string; effort?: string }
+
+/** t3ctl ≤ 0.4 `schedule.json`: recurring crons and one-shots. */
 export interface LegacyJob {
   id: string;
   createdAt: string;
@@ -154,36 +179,64 @@ export interface LegacyJob {
   tz?: string;
   nextAt: string | null;
   graceSec: number;
-  new?: { project: string; projectTitle?: string; text: string; model?: string; effort?: string; title?: string; env?: string; runtimeMode?: string; interactionMode?: string };
-  send?: { thread: string; text: string; model?: string; effort?: string };
+  new?: LegacyNew;
+  send?: LegacySend;
   runs: Array<{ at: string; firedAt: string; status: string; threadId?: string; reason?: string }>;
+}
+
+/** t3ctl 0.6 `once.json`: one-shots only. */
+export interface LegacyOnceJob {
+  id: string;
+  createdAt: string;
+  at: string;
+  graceSec: number;
+  title: string;
+  new?: LegacyNew;
+  send?: LegacySend;
+  status: "pending" | "fired" | "missed" | "failed" | string;
 }
 
 export function readLegacyJobs(path = LEGACY_SCHEDULE_PATH): LegacyJob[] {
   try { return (JSON.parse(readFileSync(path, "utf8")) as { jobs?: LegacyJob[] }).jobs ?? []; } catch { return []; }
 }
 
+export function readLegacyOnce(path = LEGACY_ONCE_PATH): LegacyOnceJob[] {
+  try { return (JSON.parse(readFileSync(path, "utf8")) as { jobs?: LegacyOnceJob[] }).jobs ?? []; } catch { return []; }
+}
+
 export type LegacyConversion =
-  | { ok: true; kind: "task"; job: LegacyJob; schedule: Schedule; title: string; prompt: string; note?: string }
-  | { ok: true; kind: "once"; job: LegacyJob; at: string; title: string; prompt: string }
-  | { ok: false; job: LegacyJob; reason: string };
+  | { ok: true; id: string; schedule: Schedule; title: string; prompt: string; new?: LegacyNew; send?: LegacySend; note?: string }
+  | { ok: false; id: string; reason: string };
 
 /**
- * Pending legacy jobs: recurring crons → T3 schedules (server tasks); one-shots still in the future → client-side
- * one-shot jobs (src/once.ts), since the server has no single-fire schedule.
+ * A one-shot the ticker never fired → a server `once` task. Already late but inside its grace (the ticker was not
+ * running) → fire a minute from now, since the server refuses a past `runAt`; past grace → skipped as missed.
  */
+function onceConversion(id: string, at: string, graceSec: number, title: string, prompt: string, target: { new?: LegacyNew; send?: LegacySend }, now: Date): LegacyConversion {
+  const lateSec = (now.getTime() - Date.parse(at)) / 1000;
+  if (lateSec > graceSec) return { ok: false, id, reason: `one-shot at ${at} is already in the past` };
+  const runAt = lateSec >= -60 ? new Date(now.getTime() + 60_000).toISOString() : at;
+  return { ok: true, id, schedule: { type: "once", runAt }, title, prompt, ...target, ...(runAt !== at ? { note: `was due ${at}; runs a minute from now` } : {}) };
+}
+
+/** Pending ≤ 0.4 jobs: recurring crons → T3 fixed-time/interval schedules, one-shots → T3 `once` schedules. */
 export function convertLegacyJob(job: LegacyJob, now = new Date()): LegacyConversion {
   const prompt = job.new?.text ?? job.send?.text ?? "";
   const title = job.new?.title ?? prompt.split("\n")[0].slice(0, 80) ?? "Scheduled task";
-  if (!job.nextAt) return { ok: false, job, reason: "already finished (one-shot that fired)" };
-  if (!job.cron) {
-    if (Date.parse(job.nextAt) <= now.getTime()) return { ok: false, job, reason: `one-shot at ${job.nextAt} is already in the past` };
-    return { ok: true, kind: "once", job, at: job.nextAt, title, prompt };
-  }
+  const target = { new: job.new, send: job.send };
+  if (!job.nextAt) return { ok: false, id: job.id, reason: "already finished (one-shot that fired)" };
+  if (!job.cron) return onceConversion(job.id, job.nextAt, 0, title, prompt, target, now);
   try {
     const schedule = cronToSchedule(job.cron);
-    return { ok: true, kind: "task", job, schedule, title, prompt, ...(job.tz && job.tz.toUpperCase() !== "UTC" ? { note: `was pinned to ${job.tz}; T3 Code fixed times are in the server's local time zone` } : job.tz ? { note: "was pinned to UTC; T3 Code fixed times are in the server's local time zone" } : {}) };
+    return { ok: true, id: job.id, schedule, title, prompt, ...target, ...(job.tz && job.tz.toUpperCase() !== "UTC" ? { note: `was pinned to ${job.tz}; T3 Code fixed times are in the server's local time zone` } : job.tz ? { note: "was pinned to UTC; T3 Code fixed times are in the server's local time zone" } : {}) };
   } catch (e) {
-    return { ok: false, job, reason: e instanceof Error ? e.message : String(e) };
+    return { ok: false, id: job.id, reason: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** Pending 0.6 one-shots → T3 `once` schedules (finished ones are skipped). */
+export function convertLegacyOnce(job: LegacyOnceJob, now = new Date()): LegacyConversion {
+  if (job.status !== "pending") return { ok: false, id: job.id, reason: `already ${job.status}` };
+  const prompt = job.new?.text ?? job.send?.text ?? "";
+  return onceConversion(job.id, job.at, job.graceSec, job.title || prompt.split("\n")[0].slice(0, 80) || "One-shot", prompt, { new: job.new, send: job.send }, now);
 }

@@ -250,24 +250,11 @@ test("cli: schedule add --thread binds the task to that thread; list/show/update
   assert.equal(errorOf(gone).code, "task_not_found");
 });
 
-test("cli: schedule install/uninstall are no-ops under T3CTL_NO_LAUNCHD (the suite never touches the real agent); idle tick is silent", async () => {
-  const inst = await runCli(fake.origin, ["schedule", "install"]);
-  assert.equal(inst.code, 0, inst.stderr);
-  assert.equal(JSON.parse(inst.stdout).installed, false);
-  assert.equal(JSON.parse(inst.stdout).label, "dev.t3ctl.scheduler");
-  const un = await runCli(fake.origin, ["schedule", "uninstall"]);
-  assert.equal(JSON.parse(un.stdout).removed, false);
-  const tick = await runCli(fake.origin, ["schedule", "tick"]);
-  assert.equal(tick.code, 0, tick.stderr);
-  assert.deepEqual(JSON.parse(tick.stdout), []);
-  assert.equal(tick.stderr, "");
-});
-
 test("cli: schedule migrate (dry run) skips legacy jobs the server already schedules for the same target, converts the rest", async () => {
+  fake.descriptor.serverVersion = "0.1.7";
   const t = fake.seed("Board", "x", 5);
   fake.tasks.push({ id: "task-existing", title: "Daily planner loop", prompt: "plan", enabled: true, projectId: fake.project.id, threadId: t.id, schedule: { type: "fixed_time", timeOfDay: "09:00", weekdays: [1, 2, 3, 4, 5] }, workspaceStrategy: { type: "root" }, modelSelection: { instanceId: "claudeAgent", model: "claude-opus-4-8" }, runtimeMode: "auto", interactionMode: "default", createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z", nextRunAt: "2030-01-01T09:00:00.000Z", lastRunAt: null, lastRunStatus: "never", lastRunError: null, runCount: 0 } as never);
-  const dir = mkdtempSync(join(tmpdir(), "t3ctl-legacy-"));
-  writeFileSync(join(dir, "config.json"), "{}");
+  const dir = configDir();
   const job = (id: string, cron: string | undefined, nextAt: string, send: Record<string, unknown>) => ({ id, createdAt: "2026-09-01T00:00:00.000Z", cron, nextAt, graceSec: 3600, send, runs: [] });
   writeFileSync(join(dir, "schedule.json"), JSON.stringify({ jobs: [
     job("dup00000", "0 9 * * 1-5", "2030-01-01T09:00:00.000Z", { thread: t.id, text: "plan the day" }),
@@ -283,142 +270,77 @@ test("cli: schedule migrate (dry run) skips legacy jobs the server already sched
   assert.match(byJob.dup00000.reason, /already scheduled as task task-existing/);
   assert.equal(byJob.new00000.action, "would-create");
   assert.equal(byJob.new00000.schedule, "thu 08:00");
-  assert.equal(byJob.once0000.action, "would-create-once");   // future one-shot → t3ctl one-shot job
+  assert.equal(byJob.once0000.action, "would-create");          // future one-shot → server `once` task
+  assert.equal(byJob.once0000.schedule, "once 2030-01-01T10:00:00Z");
   assert.equal(fake.tasks.length, 1);     // dry run creates nothing
 });
 
-// ---- One-shots (client-side, --once) ----
+// ---- One-time schedules (server-side since T3 Code 0.1.7) ----
 
-const onceDir = () => { const dir = mkdtempSync(join(tmpdir(), "t3ctl-once-")); writeFileSync(join(dir, "config.json"), "{}"); return dir; };
-const readOnceFile = (dir: string) => JSON.parse(readFileSync(join(dir, "once.json"), "utf8")).jobs as Array<Record<string, unknown> & { id: string; at: string; status: string; send?: { thread: string; text: string } }>;
+const configDir = () => { const dir = mkdtempSync(join(tmpdir(), "t3ctl-sched-")); writeFileSync(join(dir, "config.json"), "{}"); return dir; };
 
-test("cli: schedule add --once keeps the job client-side (no server task), validates the target, and rejects mixes", async () => {
-  const dir = onceDir();
+test("cli: schedule add --once upserts a server `once` task, needs T3 Code 0.1.7, rejects past times and mixes", async () => {
+  fake.descriptor.serverVersion = "0.1.7";
   const t = fake.seed("Board", "x", 5);
-  const r = await runCli(fake.origin, ["schedule", "add", "--once", "2h", "--thread", t.id, "-e", "low", "Check the board later"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
+  const r = await runCli(fake.origin, ["schedule", "add", "--once", "2h", "--thread", t.id, "-e", "low", "Check the board later"]);
   assert.equal(r.code, 0, r.stderr);
-  const out = JSON.parse(r.stdout);
-  assert.equal(out.kind, "once");
-  assert.match(out.id, /^once:[0-9a-f]{8}$/);
-  assert.equal(out.status, "pending");
-  assert.equal(out.send.thread, t.id);
-  assert.equal(out.send.effort, "low");
-  assert.equal(out.graceSec, 3600);
-  assert.equal(out.tickerInstalled, false);          // T3CTL_NO_LAUNCHD in tests
-  assert.ok(Date.parse(out.at) > Date.now() + 110 * 60_000);
-  assert.equal(fake.tasks.length, 0);
-  assert.equal(readOnceFile(dir).length, 1);
+  const task = JSON.parse(r.stdout);
+  assert.equal(task.schedule.type, "once");
+  assert.ok(Date.parse(task.schedule.runAt) > Date.now() + 110 * 60_000);
+  assert.equal(task.threadId, t.id);
+  assert.equal(fake.tasks.length, 1);
 
-  const mixed = await runCli(fake.origin, ["schedule", "add", "--once", "2h", "--every", "1h", "--thread", t.id, "x"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(errorOf(mixed).code, "invalid_option");
-  const past = await runCli(fake.origin, ["schedule", "add", "--once", "2020-01-01T00:00:00Z", "--thread", t.id, "x"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.match(errorOf(past).message, /in the past/);
-  const graceAlone = await runCli(fake.origin, ["schedule", "add", "--every", "1h", "--grace", "5m", "--thread", t.id, "x"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.match(errorOf(graceAlone).message, /--grace only applies to --once/);
-  const badModel = await runCli(fake.origin, ["schedule", "add", "--once", "2h", "-p", "dev", "-m", "nonexistent-model", "x"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(badModel.code, 1);
-  assert.equal(readOnceFile(dir).length, 1);
-
-  const list = await runCli(fake.origin, ["schedule"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  const l = JSON.parse(list.stdout);
-  assert.equal(l.tasks.length, 0);
-  assert.equal(l.once.length, 1);
-  assert.equal(l.ticker.installed, false);
-  const show = await runCli(fake.origin, ["schedule", "show", out.id.slice(5, 11)], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(JSON.parse(show.stdout).id, out.id);
-  const upd = await runCli(fake.origin, ["schedule", "update", out.id, "--once", "3h", "--grace", "10m", "-t", "Renamed"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
+  const upd = await runCli(fake.origin, ["schedule", "update", task.id, "--once", "2030-01-02T03:04:00Z"]);
   assert.equal(upd.code, 0, upd.stderr);
-  assert.equal(JSON.parse(upd.stdout).graceSec, 600);
-  assert.equal(JSON.parse(upd.stdout).title, "Renamed");
-  const dis = await runCli(fake.origin, ["schedule", "disable", out.id], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(errorOf(dis).code, "invalid_option");
-  const rm = await runCli(fake.origin, ["schedule", "remove", out.id], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(rm.code, 0, rm.stderr);
-  assert.equal(readOnceFile(dir).length, 0);
+  assert.deepEqual(JSON.parse(upd.stdout).schedule, { type: "once", runAt: "2030-01-02T03:04:00.000Z" });
+
+  const mixed = await runCli(fake.origin, ["schedule", "add", "--once", "2h", "--every", "1h", "--thread", t.id, "x"]);
+  assert.equal(errorOf(mixed).code, "invalid_option");
+  const past = await runCli(fake.origin, ["schedule", "add", "--once", "2020-01-01T00:00:00Z", "--thread", t.id, "x"]);
+  assert.match(errorOf(past).message, /in the past/);
+  const grace = await runCli(fake.origin, ["schedule", "add", "--once", "2h", "--grace", "5m", "--thread", t.id, "x"]);
+  assert.notEqual(grace.code, 0);                                   // --grace is gone with the client-side ticker
+
+  fake.descriptor.serverVersion = "0.1.6";
+  const old = await runCli(fake.origin, ["schedule", "add", "--once", "2h", "--thread", t.id, "x"]);
+  assert.equal(old.code, INCOMPATIBLE_EXIT);
+  assert.equal(errorOf(old).code, "incompatible_server");
+  assert.equal(fake.tasks.length, 1);
 });
 
-test("cli: schedule tick fires due one-shots once (queued into a busy thread), marks late ones missed, ignores the rest", async () => {
-  const dir = onceDir();
-  const idle = fake.seed("Idle target", "x", 5);
-  const busy = fake.seed("Busy target", "x", 5, { status: "running", activeRunId: "run:busy:9" });
-  for (const [ref, when] of [[idle.id, "1h"], [busy.id, "1h"], [idle.id, "2h"]]) {
-    const r = await runCli(fake.origin, ["schedule", "add", "--once", when, "--thread", ref, `fire ${when} ${ref.slice(-2)}`], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-    assert.equal(r.code, 0, r.stderr);
-  }
-  const jobs = readOnceFile(dir);
-  jobs[0].at = new Date(Date.now() - 60_000).toISOString();          // due 1 min ago → fires
-  jobs[1].at = new Date(Date.now() - 120_000).toISOString();         // due, thread busy → queued
-  jobs[2].at = new Date(Date.now() - 2 * 3600_000).toISOString();    // 2 h late, grace 1 h → missed
-  writeFileSync(join(dir, "once.json"), JSON.stringify({ jobs }));
-  const before = fake.commands.length;
-
-  const quiet = await runCli(fake.origin, ["schedule", "tick"], undefined, {}, { T3CTL_CONFIG_DIR: onceDir() });
-  assert.equal(quiet.code, 0, quiet.stderr);
-  assert.deepEqual(JSON.parse(quiet.stdout), []);
+test("cli: schedule migrate moves pending 0.6 one-shots (once.json) to server tasks, renames the file, and the hidden tick does the same", async () => {
+  fake.descriptor.serverVersion = "0.1.7";
+  const t = fake.seed("Legacy target", "x", 5);
+  const once = (id: string, at: string, status = "pending", graceSec = 3600) => ({ id, createdAt: "2026-10-01T00:00:00.000Z", at, graceSec, title: `legacy ${id}`, status, send: { thread: t.id, text: `legacy ${id}` } });
+  const future = new Date(Date.now() + 3 * 86400_000).toISOString();
+  const dir = configDir();
+  writeFileSync(join(dir, "once.json"), JSON.stringify({ jobs: [
+    once("once:fut1", future),
+    once("once:late", new Date(Date.now() - 10 * 60_000).toISOString()),           // 10 min late, grace 1 h → a minute from now
+    once("once:miss", new Date(Date.now() - 2 * 3600_000).toISOString()),          // 2 h late → skipped
+    once("once:done", "2026-10-01T00:00:00.000Z", "fired"),
+  ] }));
+  const dry = await runCli(fake.origin, ["schedule", "migrate"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
+  assert.equal(dry.code, 0, dry.stderr);
+  const by = Object.fromEntries(JSON.parse(dry.stdout).plan.map((p: { job: string }) => [p.job, p]));
+  assert.deepEqual(Object.keys(by).sort(), ["once:fut1", "once:late", "once:miss"]);
+  assert.equal(by["once:fut1"].action, "would-create");
+  assert.equal(by["once:late"].action, "would-create");
+  assert.match(by["once:late"].note, /runs a minute from now/);
+  assert.equal(by["once:miss"].action, "skip");
+  assert.equal(fake.tasks.length, 0);
 
   const tick = await runCli(fake.origin, ["schedule", "tick"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
   assert.equal(tick.code, 0, tick.stderr);
-  const results = JSON.parse(tick.stdout) as Array<{ id: string; status: string; threadId?: string; reason?: string }>;
-  assert.deepEqual(results.map((r) => r.status).sort(), ["fired", "fired", "missed"]);
-  const fired = results.filter((r) => r.status === "fired");
-  assert.deepEqual(fired.map((r) => r.threadId).sort(), [busy.id, idle.id].sort());
-  assert.match(fired.find((r) => r.threadId === busy.id)!.reason ?? "", /queued/);
-  assert.match(results.find((r) => r.status === "missed")!.reason ?? "", /late by 2\.0h/);
-  const dispatched = fake.commands.slice(before).filter((c) => c.type === "message.dispatch");
-  assert.equal(dispatched.length, 2);
-  assert.deepEqual(dispatched.find((c) => c.threadId === busy.id)!.dispatchMode, { type: "queue_after_active" });
-  assert.deepEqual(readOnceFile(dir).map((j) => j.status).sort(), ["fired", "fired", "missed"]);
+  const a = JSON.parse(tick.stdout);
+  assert.equal(a.created.length, 2);
+  assert.deepEqual(fake.tasks.map((x) => x.schedule.type), ["once", "once"]);
+  assert.ok(!existsSync(join(dir, "once.json")));
+  assert.ok(existsSync(join(dir, "once.legacy.json")));
 
   const again = await runCli(fake.origin, ["schedule", "tick"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.deepEqual(JSON.parse(again.stdout), []);                    // nothing fires twice
-  assert.equal(fake.commands.length - before, 2);
-  const listAll = await runCli(fake.origin, ["schedule", "-a"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(JSON.parse(listAll.stdout).once.length, 3);
-  const listPending = await runCli(fake.origin, ["schedule"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(JSON.parse(listPending.stdout).once.length, 0);
-});
-
-test("cli: schedule run <once> fires a pending one-shot immediately", async () => {
-  const dir = onceDir();
-  const t = fake.seed("Run me", "x", 5);
-  const add = await runCli(fake.origin, ["schedule", "add", "--once", "5h", "--thread", t.id, "now please"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  const id = JSON.parse(add.stdout).id as string;
-  const run = await runCli(fake.origin, ["schedule", "run", id], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(run.code, 0, run.stderr);
-  assert.equal(JSON.parse(run.stdout).status, "fired");
-  assert.equal(fake.commands.at(-1)!.text, "now please");
-  const twice = await runCli(fake.origin, ["schedule", "run", id], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(errorOf(twice).code, "invalid_option");
-});
-
-test("cli: schedule migrate turns future legacy one-shots into t3ctl one-shots and reads the renamed legacy file", async () => {
-  const dir = onceDir();
-  const t = fake.seed("Legacy target", "x", 5);
-  const job = (id: string, nextAt: string) => ({ id, createdAt: "2026-09-01T00:00:00.000Z", nextAt, graceSec: 1800, send: { thread: t.id, text: `legacy ${id}` }, runs: [] });
-  const future = new Date(Date.now() + 3 * 86400_000).toISOString();
-  writeFileSync(join(dir, "schedule.legacy.json"), JSON.stringify({ jobs: [job("fut00001", future), job("past0001", "2020-01-01T00:00:00.000Z")] }));
-  const dry = await runCli(fake.origin, ["schedule", "migrate"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(dry.code, 0, dry.stderr);
-  const d = JSON.parse(dry.stdout);
-  assert.match(d.source, /schedule\.legacy\.json$/);
-  const by = Object.fromEntries(d.plan.map((p: { job: string }) => [p.job, p]));
-  assert.equal(by.fut00001.action, "would-create-once");
-  assert.equal(by.past0001.action, "skip");
-  assert.match(by.past0001.reason, /already in the past/);
-  assert.ok(!existsSync(join(dir, "once.json")));
-
-  const apply = await runCli(fake.origin, ["schedule", "migrate", "--apply"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  assert.equal(apply.code, 0, apply.stderr);
-  const a = JSON.parse(apply.stdout);
-  assert.equal(a.createdOnce.length, 1);
-  assert.equal(a.createdOnce[0].at, future);
-  assert.equal(a.createdOnce[0].graceSec, 1800);
-  assert.equal(a.createdOnce[0].send.text, "legacy fut00001");
-  assert.equal(readOnceFile(dir).length, 1);
-  assert.ok(existsSync(join(dir, "schedule.legacy.json")), "the archived file is left in place");
-
-  const second = await runCli(fake.origin, ["schedule", "migrate"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
-  const by2 = Object.fromEntries(JSON.parse(second.stdout).plan.map((p: { job: string }) => [p.job, p]));
-  assert.equal(by2.fut00001.action, "skip");
-  assert.match(by2.fut00001.reason, /already a one-shot/);
+  assert.equal(again.code, 0, again.stderr);
+  assert.equal(fake.tasks.length, 2);                                // nothing migrates twice
+  const list = await runCli(fake.origin, ["schedule"], undefined, {}, { T3CTL_CONFIG_DIR: dir });
+  assert.equal(JSON.parse(list.stdout).legacy, undefined);
 });

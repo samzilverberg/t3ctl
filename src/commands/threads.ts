@@ -1,7 +1,7 @@
 import { Option, type Command } from "commander";
 import { readFileSync } from "node:fs";
 import { connect, withAuthRetry, type Ctx, type GlobalOpts } from "../context.js";
-import { api, dispatch, rpc, type ShellProject, type ShellThread, type ThreadProjection } from "../http.js";
+import { api, dispatch, isListedThread, rpc, type ShellProject, type ShellThread, type ThreadProjection } from "../http.js";
 import { ago, emit, renderTable, short } from "../output.js";
 import { RpcSocket } from "../ws.js";
 import { uuid } from "../ids.js";
@@ -62,7 +62,8 @@ export function registerThreads(program: Command) {
     .option("-a, --all", "include archived threads", false)
     .option("-n, --limit <n>", "max rows", intArg, 50)
     .option("-i, --ids <ids>", "comma-separated thread ids/prefixes to report on (implies -a; unknown ids reported with status missing)")
-    .action(async (o: { project?: string; status?: string; all: boolean; limit: number; ids?: string }) => {
+    .option("--subagents", "also list subagent children and side chats (hidden like in the app)", false)
+    .action(async (o: { project?: string; status?: string; all: boolean; limit: number; ids?: string; subagents: boolean }) => {
       const g = program.opts<GlobalOpts>();
       const ctx = await connect(g);
       if (o.ids) o.all = true;
@@ -76,6 +77,7 @@ export function registerThreads(program: Command) {
         return;
       }
       if (!o.all) list = list.filter((t) => !t.archivedAt);
+      if (!o.subagents) list = list.filter(isListedThread);
       if (o.project) { const p = matchProject(shell.projects, o.project); list = list.filter((t) => t.projectId === p.id); }
       if (o.status) list = list.filter((t) => t.status === o.status);
       list.sort((a, b) => Date.parse(b.updatedAt ?? b.createdAt ?? "0") - Date.parse(a.updatedAt ?? a.createdAt ?? "0"));

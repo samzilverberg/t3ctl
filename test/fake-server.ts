@@ -123,12 +123,13 @@ export async function startFake(): Promise<Fake> {
           if (p.type === "thread.archive") { const t = threads.find((x) => x.id === p.threadId); if (t) t.archivedAt = new Date().toISOString(); }
           return ok({ sequence: ++seq });
         }
-        case "scheduledTasks.list": return ok({ tasks });
+        // 0.1.7 has no unary list; the subscription's first chunk is the snapshot (the client interrupts after it).
+        case "scheduledTasks.subscribe": return void ws.send(JSON.stringify({ _tag: "Chunk", requestId: f.id, values: [{ tasks }] }));
         case "scheduledTasks.upsert": {
           const existing = tasks.find((t) => t.id === p.id);
           if (p.requireExisting && !existing) return fail({ _tag: "ScheduledTaskError", message: "not found" });
           const now = new Date().toISOString();
-          const task = { ...(existing ?? { id: `task-${++n}`, createdAt: now, lastRunAt: null, lastRunStatus: "never", lastRunError: null, runCount: 0 }), ...p, updatedAt: now, nextRunAt: p.enabled ? "2030-01-01T09:00:00.000Z" : null } as unknown as ScheduledTask;
+          const task = { ...(existing ?? { id: `task-${++n}`, createdAt: now, lastRunAt: null, lastRunStatus: "never", lastRunError: null, runCount: 0 }), ...p, updatedAt: now, nextRunAt: !p.enabled ? null : (p.schedule as { type?: string })?.type === "once" ? new Date((p.schedule as { runAt: string }).runAt).toISOString() : "2030-01-01T09:00:00.000Z" } as unknown as ScheduledTask;
           delete (task as Record<string, unknown>).commandId; delete (task as Record<string, unknown>).requireExisting;
           if (existing) tasks[tasks.indexOf(existing)] = task; else tasks.push(task);
           return ok({ task });

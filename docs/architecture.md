@@ -61,8 +61,8 @@ dispatched to the service leaves the UI stale. Discovery probes 3773-3780 (plus 
   `thread.runtime-mode.set`, `thread.interaction-mode.set`. Commands carry `createdBy: "user"`,
   `creationSource: "server"` where the schema has creation fields.
 - **Projects**: `POST /api/projects/mutate` with `project.create | project.update | project.delete`.
-- **Scheduler**: `scheduledTasks.list | upsert | setEnabled | delete | runNow` (`upsert` with `id` +
-  `requireExisting` edits). See [scheduler.md](scheduler.md).
+- **Scheduler**: `scheduledTasks.subscribe` (read: first value is the full list; 0.1.7 removed the unary
+  `scheduledTasks.list`), `upsert | setEnabled | delete | runNow` (`upsert` with `id` + `requireExisting` edits). See [scheduler.md](scheduler.md).
 
 "Idle" is derived, not an RPC. `threads wait` subscribes to `orchestration.subscribeThread` and ends on a
 terminal `run.updated` (`completed|failed|interrupted|cancelled`) after having seen an active run, or on a

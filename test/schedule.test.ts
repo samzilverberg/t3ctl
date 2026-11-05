@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { convertLegacyJob, cronToSchedule, describeSchedule, fixedTimeSchedule, intervalSchedule, matchTask, parseDuration, parseWeekdays, type LegacyJob, type ScheduledTask } from "../src/schedule.js";
+import { convertLegacyJob, convertLegacyOnce, cronToSchedule, describeSchedule, fixedTimeSchedule, intervalSchedule, matchTask, onceSchedule, shortTaskId, parseDuration, parseWeekdays, type LegacyJob, type LegacyOnceJob, type ScheduledTask } from "../src/schedule.js";
 import { CliError } from "../src/errors.js";
 
 test("parseDuration", () => {
@@ -58,7 +58,7 @@ test("describeSchedule", () => {
   assert.equal(describeSchedule({ type: "webhook", signature: null }), "webhook");
 });
 
-test("legacy launchd jobs: recurring cron → server task, future one-shot → t3ctl one-shot, past/finished skipped with a reason", () => {
+test("legacy launchd jobs (≤ 0.4): recurring cron → server task, future one-shot → server once task, past/finished skipped with a reason", () => {
   const NOW = new Date("2026-10-22T12:00:00Z");
   const base = { createdAt: "2026-09-10T00:00:00Z", graceSec: 3600, runs: [] };
   const cron: LegacyJob = { ...base, id: "a", cron: "0 9 * * 1-5", tz: "UTC", nextAt: "2026-10-23T09:00:00Z", new: { project: "p", text: "Morning: triage\nmore", model: "sonnet" } };
@@ -66,14 +66,33 @@ test("legacy launchd jobs: recurring cron → server task, future one-shot → t
   const done: LegacyJob = { ...base, id: "c", nextAt: null, new: { project: "p", text: "x" } };
   const weird: LegacyJob = { ...base, id: "d", cron: "0 9 1 * *", nextAt: "2026-11-01T09:00:00Z", new: { project: "p", text: "monthly" } };
   const c = convertLegacyJob(cron, NOW);
-  assert.ok(c.ok && c.kind === "task");
-  if (c.ok && c.kind === "task") { assert.deepEqual(c.schedule, { type: "fixed_time", timeOfDay: "09:00", weekdays: [1, 2, 3, 4, 5] }); assert.equal(c.title, "Morning: triage"); assert.match(c.note ?? "", /UTC/); }
+  assert.ok(c.ok);
+  if (c.ok) { assert.deepEqual(c.schedule, { type: "fixed_time", timeOfDay: "09:00", weekdays: [1, 2, 3, 4, 5] }); assert.equal(c.title, "Morning: triage"); assert.match(c.note ?? "", /UTC/); assert.equal(c.new?.model, "sonnet"); }
   const o = convertLegacyJob(once, NOW);
-  assert.ok(o.ok && o.kind === "once");
-  if (o.ok && o.kind === "once") { assert.equal(o.at, "2026-10-23T09:00:00Z"); assert.equal(o.prompt, "ping"); }
+  assert.ok(o.ok);
+  if (o.ok) { assert.deepEqual(o.schedule, { type: "once", runAt: "2026-10-23T09:00:00Z" }); assert.equal(o.prompt, "ping"); assert.equal(o.send?.thread, "t"); }
   const stale = convertLegacyJob(once, new Date("2026-10-24T00:00:00Z")); assert.equal(stale.ok, false); if (!stale.ok) assert.match(stale.reason, /already in the past/);
   const d = convertLegacyJob(done, NOW); assert.equal(d.ok, false); if (!d.ok) assert.match(d.reason, /finished/);
   const w = convertLegacyJob(weird, NOW); assert.equal(w.ok, false); if (!w.ok) assert.match(w.reason, /cannot be expressed/);
+});
+
+test("legacy once.json (0.6): pending → once task; late within grace → a minute from now; past grace or finished → skipped", () => {
+  const NOW = new Date("2026-10-22T12:00:00Z");
+  const job = (over: Partial<LegacyOnceJob>): LegacyOnceJob => ({ id: "once:aa", createdAt: "2026-10-22T09:00:00Z", at: "2026-10-22T15:00:00Z", graceSec: 3600, title: "ping", send: { thread: "t1", text: "ping" }, status: "pending", ...over });
+  const f = convertLegacyOnce(job({}), NOW);
+  assert.ok(f.ok); if (f.ok) { assert.deepEqual(f.schedule, { type: "once", runAt: "2026-10-22T15:00:00Z" }); assert.equal(f.title, "ping"); assert.equal(f.note, undefined); }
+  const late = convertLegacyOnce(job({ at: "2026-10-22T11:30:00Z" }), NOW);
+  assert.ok(late.ok); if (late.ok) { assert.deepEqual(late.schedule, { type: "once", runAt: "2026-10-22T12:01:00.000Z" }); assert.match(late.note ?? "", /a minute from now/); }
+  const missed = convertLegacyOnce(job({ at: "2026-10-22T10:00:00Z" }), NOW); assert.equal(missed.ok, false);
+  const fired = convertLegacyOnce(job({ status: "fired" }), NOW); assert.equal(fired.ok, false); if (!fired.ok) assert.match(fired.reason, /already fired/);
+});
+
+test("onceSchedule / describeSchedule: future-only one-time schedule", () => {
+  const NOW = new Date("2026-10-22T10:00:00Z");
+  assert.deepEqual(onceSchedule("2h", NOW), { type: "once", runAt: "2026-10-22T12:00:00.000Z" });
+  assert.deepEqual(onceSchedule("2026-10-25T07:30:00Z", NOW), { type: "once", runAt: "2026-10-25T07:30:00.000Z" });
+  assert.throws(() => onceSchedule("2026-10-22T09:59:00Z", NOW), (e: unknown) => e instanceof CliError && /in the past/.test(e.message));
+  assert.equal(describeSchedule({ type: "once", runAt: "2026-10-25T07:30:00.000Z" }), "once 2026-10-25T07:30:00Z");
 });
 
 test("matchTask: id, prefix, exact title", () => {
@@ -81,6 +100,8 @@ test("matchTask: id, prefix, exact title", () => {
   assert.equal(matchTask(tasks, "scheduled-task:def").title, "Weekly");
   assert.equal(matchTask(tasks, "scheduled-task:a").title, "Daily");
   assert.equal(matchTask(tasks, "Weekly").id, "scheduled-task:def");
+  assert.equal(matchTask(tasks, "de").title, "Weekly");                 // bare uuid prefix, as `schedule` shows it
+  assert.equal(shortTaskId("scheduled-task:46414e21-a481-488d"), "46414e21");
   assert.throws(() => matchTask(tasks, ""), (e: unknown) => e instanceof CliError && e.code === "task_not_found");
   assert.throws(() => matchTask(tasks, "nope"), /scheduled task not found/);
 });
