@@ -30,6 +30,7 @@ t3ctl threads new -p myrepo --batch tasks.json     # 2-5 threads in one call
 t3ctl threads wait <ref>                           # exit 0 idle · 2 needs you · 3 error · 4 timeout
 t3ctl threads pending <ref> && t3ctl threads approve <ref>
 t3ctl threads send <ref> "Also add a regression test"
+t3ctl threads send <ref> --fresh "/handoff:resume"  # same thread, new session without the old context (T3 Code ≥ 0.1.9)
 t3ctl schedule add --at 09:00 --days mon-fri -p myrepo "Triage new issues"      # T3 Code's built-in scheduler
 t3ctl schedule add --every 2h --thread <ref> "Summarise open PRs"
 t3ctl schedule add --once "tomorrow 09:00" --thread <ref> "Check the deploy"     # one-time (T3 Code ≥ 0.1.7)
@@ -56,6 +57,6 @@ pnpm test           # unit tests against recorded fixtures (test/fixtures)
 pnpm build          # required after changes: the global link runs dist/
 ```
 
-Status: v0.7.1, verified against T3 Code 0.1.7 (2026-11-05). Minimum supported T3 Code: **0.1.0**
+Status: v0.8.0, verified against T3 Code 0.1.9 (2026-11-12). Minimum supported T3 Code: **0.1.0**
 (orchestration protocol 2, checked on every connect). The protocol is internal to T3 Code; expect to re-check
 after app updates. MIT.

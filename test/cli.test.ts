@@ -12,7 +12,7 @@ let fake: Fake;
 before(async () => { fake = await startFake(); });
 after(async () => { await fake.close(); });
 beforeEach(() => {
-  fake.threads.length = 0; fake.messages.clear(); fake.commands.length = 0; fake.launches.length = 0; fake.mutations.length = 0; fake.tasks.length = 0; fake.requests.clear(); delete (fake.descriptor.capabilities as Record<string, unknown>).threadForceStop;
+  fake.threads.length = 0; fake.messages.clear(); fake.commands.length = 0; fake.launches.length = 0; fake.mutations.length = 0; fake.tasks.length = 0; fake.requests.clear(); delete (fake.descriptor.capabilities as Record<string, unknown>).threadForceStop; delete (fake.descriptor.capabilities as Record<string, unknown>).freshContext;
   fake.descriptor.serverVersion = "0.1.1"; fake.descriptor.orchestrationProtocolVersion = 2;
 });
 
@@ -165,6 +165,34 @@ test("cli: threads send is message.dispatch; refused on a running thread unless 
   assert.deepEqual(fake.commands.at(-1)!.dispatchMode, { type: "steer_active", targetRunId: "run:busy:1" });
   const both = await runCli(fake.origin, ["threads", "send", busy.id, "--queue", "--steer", "x"]);
   assert.equal(errorOf(both).code, "invalid_option");
+});
+
+test("cli: threads send --fresh dispatches freshContext; refused without the server capability and with --steer", async () => {
+  const idle = fake.seed("Fresh one", "hello", 5);
+  const before = fake.commands.length;
+  const old = await runCli(fake.origin, ["threads", "send", idle.id, "--fresh", "/handoff:resume"]);
+  assert.equal(old.code, 7);
+  assert.equal(errorOf(old).code, "incompatible_server");
+  assert.match(errorOf(old).message, /freshContext/);
+  assert.equal(fake.commands.length, before, "nothing dispatched without the capability");
+  (fake.descriptor.capabilities as Record<string, unknown>).freshContext = true;
+  const r = await runCli(fake.origin, ["threads", "send", idle.id, "--fresh", "/handoff:resume"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).freshContext, true);
+  const cmd = fake.commands.at(-1)!;
+  assert.equal(cmd.type, "message.dispatch");
+  assert.equal(cmd.freshContext, true);
+  assert.deepEqual(cmd.dispatchMode, { type: "start_immediately" });
+  const plain = await runCli(fake.origin, ["threads", "send", idle.id, "no fresh"]);
+  assert.equal(plain.code, 0, plain.stderr);
+  assert.equal("freshContext" in fake.commands.at(-1)!, false);
+  const busy = fake.seed("Busy fresh", "hello", 5, { status: "running", activeRunId: "run:bf:1" });
+  const steer = await runCli(fake.origin, ["threads", "send", busy.id, "--fresh", "--steer", "x"]);
+  assert.equal(errorOf(steer).code, "invalid_option");
+  const queued = await runCli(fake.origin, ["threads", "send", busy.id, "--fresh", "--queue", "later"]);
+  assert.equal(queued.code, 0, queued.stderr);
+  assert.deepEqual(fake.commands.at(-1)!.dispatchMode, { type: "queue_after_active" });
+  assert.equal(fake.commands.at(-1)!.freshContext, true);
 });
 
 test("cli: interrupt is thread.stop and needs an active run", async () => {

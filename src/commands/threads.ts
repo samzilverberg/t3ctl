@@ -242,18 +242,20 @@ export function registerThreads(program: Command) {
     .option("--interaction-mode <mode>", `${INTERACTION_MODES.join("|")} (changes the thread setting)`)
     .option("--queue", "if a run is active, queue the message to run after it", false)
     .option("--steer", "if a run is active, inject the message into it", false)
+    .option("--fresh", "start a new provider session in the same thread, without its earlier context (like /clear in the composer; T3 Code 0.1.9+). Never steers", false)
     .option("--stdin", STDIN_ALIAS, false)
     .option("--wait", "wait for the run to finish", false)
     .option("--timeout <seconds>", "with --wait", intArg, 1800)
-    .action(async (ref: string, promptArg: string | undefined, o: { model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; queue: boolean; steer: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
+    .action(async (ref: string, promptArg: string | undefined, o: { model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; queue: boolean; steer: boolean; fresh: boolean; stdin: boolean; wait: boolean; timeout: number }) => {
       const g = program.opts<GlobalOpts>();
       if (o.queue && o.steer) throw new CliError("invalid_option", "pass --queue or --steer, not both", { option: "queue" });
+      if (o.fresh && o.steer) throw new CliError("invalid_option", "--fresh never steers: pass --queue to run it after the active run", { option: "fresh" });
       const ctx = await connect(g, { write: true });
       const text = readPrompt(promptArg, o);
       const shell = await withAuthRetry(ctx, g, api.shell);
       const t = matchThread(shell.threads, ref);
       const res = await startTurn(ctx, g, t, { ...o, text, whenRunning: o.queue ? "queue" : o.steer ? "steer" : "refuse" });
-      if (!o.wait) { emit(ctx.format, { threadId: t.id, sequence: res.sequence, dispatchMode: res.dispatchMode }, () => `sent to ${t.id} (seq ${res.sequence}, ${res.dispatchMode})`); return; }
+      if (!o.wait) { emit(ctx.format, { threadId: t.id, sequence: res.sequence, dispatchMode: res.dispatchMode, ...(o.fresh ? { freshContext: true } : {}) }, () => `sent to ${t.id} (seq ${res.sequence}, ${res.dispatchMode}${o.fresh ? ", fresh session" : ""})`); return; }
       const out = await waitForIdle(ctx.server, ctx.client.token, t.id, { timeoutMs: o.timeout * 1000, requireRunStart: true, poll: shellPoller(ctx.client, t.id) });
       emit(ctx.format, { threadId: t.id, sequence: res.sequence, wait: out }, () => `${out.status} (${out.reason})\n\n${out.lastAssistantText ?? ""}`);
       process.exitCode = exitCodeFor(out.reason);

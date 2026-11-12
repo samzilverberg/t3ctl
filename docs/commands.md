@@ -24,7 +24,7 @@ t3ctl threads new  -p <project> [-m model] [-e effort] [--context-window 1m] [--
                    [--wait] "<prompt>" | -                   # - reads the prompt from stdin
 t3ctl threads new -p <project> [shared flags] --batch <file|->   # 2-5 related threads in one call
 t3ctl threads new … --draft [--snooze <when>]                # create without starting a turn
-t3ctl threads send <ref> [-m model] [-e effort] [--queue|--steer] [--wait] "<prompt>"
+t3ctl threads send <ref> [-m model] [-e effort] [--queue|--steer] [--fresh] [--wait] "<prompt>"
 t3ctl threads pending <ref>                                  # open approval / user-input requests, incl. delegated children
 t3ctl threads approve <ref> [-d accept|acceptForSession|acceptAlways|decline|cancel] [-r requestId] [--feedback <text>]
 t3ctl threads respond <ref> --answer <questionId>=<answer> … | --json '{…}'
@@ -187,3 +187,12 @@ waits for the run to start before snoozing. Deferred and recurring work belongs 
 `--queue` to run the message after the active run (`queue_after_active`) or `--steer` to inject it into the
 active run (`steer_active`). `-m`/`-e` change the thread's model for this and later runs; `--runtime-mode` /
 `--interaction-mode` change the thread's settings before sending.
+
+`--fresh` (T3 Code 0.1.9+) sends the message with `freshContext: true`: T3 starts a **new provider session in the
+same thread**, without the thread's earlier context, and records the new session id itself (the old session is
+detached). It is what the composer's `/clear` arms for the next message; plain `/clear` text sent with `threads send`
+still goes to the agent's own `/clear`. t3ctl checks the server's `freshContext` capability first and refuses with
+`incompatible_server` (exit 7) when it is missing, since an older server would silently keep the old context.
+`--fresh` never steers (`--fresh --steer` is refused); with `--queue` it starts after the active run. T3 rejects the
+send while the current session still runs background agents or commands (a fresh session would end them): wait and
+retry.

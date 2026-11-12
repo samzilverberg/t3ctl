@@ -14,6 +14,7 @@ import { threadStatus } from "./wait.js";
 import { short } from "./output.js";
 import { checkRate, enforceGuard, guardConfig, MAX_BATCH, MIN_BATCH, normalize } from "./guard.js";
 import { CliError } from "./errors.js";
+import { INCOMPATIBLE_EXIT } from "./discover.js";
 
 export const RUNTIME_MODES = ["approval-required", "auto-accept-edits", "auto", "full-access"] as const;
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
@@ -238,7 +239,7 @@ export async function createThreads(ctx: Ctx, g: GlobalOpts, base: Omit<NewThrea
   return created;
 }
 
-export interface SendOpts { text: string; model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; /** What to do when a run is active: refuse (default), queue after it, or steer it. */ whenRunning?: "refuse" | "queue" | "steer" }
+export interface SendOpts { text: string; model?: string; effort?: string; runtimeMode?: RuntimeMode; interactionMode?: InteractionMode; /** What to do when a run is active: refuse (default), queue after it, or steer it. */ whenRunning?: "refuse" | "queue" | "steer"; /** Start a new provider session without the thread's earlier context (T3's `/clear`, 0.1.9+). */ fresh?: boolean }
 
 /** Model for a follow-up turn: the thread's own, or `model`/`effort` overrides validated against the catalog. */
 export async function resolveTurnModel(ctx: Ctx, t: ShellThread, o: Pick<SendOpts, "model" | "effort">): Promise<ModelSelection | undefined> {
@@ -256,10 +257,15 @@ export async function resolveTurnModel(ctx: Ctx, t: ShellThread, o: Pick<SendOpt
 /**
  * Send a message to an existing, non-archived thread (`message.dispatch`). Idle thread → `start_immediately`.
  * Running thread → refused unless `whenRunning` is `queue` (runs after the active run) or `steer` (injected into it).
+ * `fresh` → `freshContext: true`: T3 starts a new provider session in the same thread (what the composer's `/clear`
+ * arms); needs the server's `freshContext` capability (older servers would silently keep the old context). Never steers.
  */
 export async function startTurn(ctx: Ctx, g: GlobalOpts, t: ShellThread, o: SendOpts): Promise<{ threadId: string; sequence: number; dispatchMode: string }> {
   const status = threadStatus(t);
   if (t.archivedAt) throw new CliError("thread_archived", `thread ${short(t.id)} is archived`, { threadId: t.id });
+  if (o.fresh && ctx.server.descriptor.capabilities?.freshContext !== true)
+    throw new CliError("incompatible_server", `this T3 Code (${ctx.server.descriptor.serverVersion}) does not support fresh sessions (--fresh needs 0.1.9+, capability freshContext)`, { capability: "freshContext", serverVersion: ctx.server.descriptor.serverVersion }, INCOMPATIBLE_EXIT);
+  if (o.fresh && o.whenRunning === "steer") throw new CliError("invalid_option", "--fresh never steers: pass --queue to run it after the active run", { option: "fresh" });
   const running = status === "running" || status === "needs-approval" || status === "needs-input";
   let dispatchMode: Record<string, unknown> = { type: "start_immediately" };
   if (running) {
@@ -280,6 +286,7 @@ export async function startTurn(ctx: Ctx, g: GlobalOpts, t: ShellThread, o: Send
     creationSource: "server",
     ...(modelSelection ? { modelSelection } : {}),
     dispatchMode,
+    ...(o.fresh ? { freshContext: true } : {}),
   };
   // runtimeMode / interactionMode are thread settings now, not per-message: apply overrides as separate commands first.
   if (o.runtimeMode && o.runtimeMode !== t.runtimeMode) await withAuthRetry(ctx, g, (c) => dispatch(c, { type: "thread.runtime-mode.set", commandId: uuid(), threadId: t.id, runtimeMode: o.runtimeMode }));

@@ -40,6 +40,7 @@ error, never "the first one". Prefer full ids in anything you write down.
 | New thread | `t3ctl threads new -p <project> -m <model> -e <effort> -t "<title>" "<prompt>"` → `{threadId, url, env, branch}` |
 | …and block until first turn ends | add `--wait --timeout 1800` → `{…, wait:{status,reason,lastAssistantText}}` |
 | Follow-up | `t3ctl threads send <ref> "<prompt>" [--wait]` (refused while running: add `--queue` to run after, `--steer` to inject) |
+| Follow-up in a fresh session (like `/clear` in the composer) | `t3ctl threads send <ref> --fresh "<prompt>"` (T3 Code 0.1.9+; same thread, new provider session without the earlier context; exit 7 on older servers) |
 | Block on a running thread | `t3ctl threads wait <ref> --timeout 1800` (exit 0 idle · 2 needs-human · 3 error · 4 timeout) |
 | What is it blocked on | `t3ctl threads pending <ref>` → `{approvals:[{requestId,requestKind,detail,reason,options,supportsFeedback}], userInputs:[{requestId,questions:[{id,question,options:[{label}]}]}], children:[{threadId,title,approvals,userInputs}]}` (a delegated child's requests, when `status` came with `blockedBy`) |
 | Approve / decline | `t3ctl threads approve <ref> -d accept` (or `decline`, `acceptForSession`, `acceptAlways`; `-r <requestId>` to pick one, a child's too; `--feedback "<why>"` where `supportsFeedback`, typically with `decline`) |
